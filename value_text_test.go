@@ -9,6 +9,7 @@ import (
 	"strings"
 	"testing"
 	"unicode"
+	"unicode/utf8"
 
 	"github.com/lestrrat-3d/units"
 	"github.com/stretchr/testify/require"
@@ -588,11 +589,126 @@ func TestDefineRejectsUnreadableSymbol(t *testing.T) {
 	requireTextRoundTrip(t, units.Scalar(0))
 }
 
-// hostileSymbolRunes are what a generated symbol is built from: the characters real
+func TestDefineRejectsEncoderCorruptibleSymbol(t *testing.T) {
+	// encoding.TextMarshaler is a contract to produce UTF-8 text, and the encoders the
+	// text form serves rewrite what they cannot represent as U+FFFD rather than fail:
+	// encoding/json rewrites every invalid UTF-8 byte, and encoding/xml rewrites a
+	// control character and the noncharacters U+FFFE/U+FFFF besides. A symbol any of
+	// them rewrites is one MarshalText could write and no decoder hands back unchanged,
+	// so Define panics and registers nothing — as it does for whitespace.
+	for _, tc := range []struct{ name, symbol string }{
+		{"a lone 0xff", "probe-invalid-\xff"},
+		{"a lone continuation byte", "probe-inv~\x80"},
+		{"a truncated sequence", "probe-inv~\xc3"},
+		{"a bad continuation", "probe-inv~\xc3\x28"},
+		{"an overlong encoding", "probe-inv~\xc0\xaf"},
+		{"a surrogate half", "probe-inv~\xed\xa0\x80"},
+		{"U+FFFD, the rewrite target", "probe-inv~\xef\xbf\xbd"},
+		{"a NUL", "probe-inv~\x00"},
+		{"a C0 control", "probe-inv~\x01"},
+		{"an ANSI escape", "probe-inv~\x1b0m"},
+		{"DEL", "probe-inv~\x7f"},
+		{"a C1 control", "probe-inv~\xc2\x90"},
+		{"U+FFFE", "probe-inv~\xef\xbf\xbe"},
+		{"U+FFFF", "probe-inv~\xef\xbf\xbf"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			require.Panics(t, func() { units.Define(tc.symbol, units.Length, 7) },
+				"a symbol a text encoder rewrites must not be registrable")
+			_, ok := units.Lookup(tc.symbol)
+			require.False(t, ok, "a rejected symbol must not be registered")
+		})
+	}
+}
+
+func TestValueTextJSONCannotAliasAcrossKinds(t *testing.T) {
+	// encoding/json replaces every invalid UTF-8 byte with U+FFFD. Were a symbol
+	// containing a raw invalid byte and its U+FFFD-normalized twin both registrable —
+	// under different kinds — a value marshalled under one would unmarshal, through a
+	// JSON document, as the other: a quantity changing what it measures by being
+	// serialized. Define closes the pair from both ends: neither symbol registers.
+	const stem = "alias-probe~"
+
+	// The confusable target first: were it registered as an angle, every corrupted
+	// document carrying the length below would deserialize as that angle.
+	target, targetOK := tryDefine(stem+"\xef\xbf\xbd", units.Angle, 2)
+	source, sourceOK := tryDefine(stem+"\xff", units.Length, 7)
+
+	// Against a registry that admitted the pair, the defect is demonstrable end to
+	// end; with Define refusing both, these blocks never run.
+	if targetOK && sourceOK {
+		doc, err := json.Marshal(step{Distance: units.New(3, source)})
+		require.NoError(t, err)
+
+		var back step
+		require.NoError(t, json.Unmarshal(doc, &back))
+		require.Equal(t, source.Kind(), back.Distance.Kind(),
+			"a quantity must not change kind by being serialized: 3 of a %s came back through %s as a %s",
+			source.Kind(), doc, back.Distance.Kind())
+		require.NotEqual(t, target, back.Distance.Unit(),
+			"the JSON round trip must not resolve to the U+FFFD twin")
+	}
+	if sourceOK {
+		text, err := units.New(3, source).MarshalText()
+		require.NoError(t, err)
+		require.True(t, utf8.Valid(text),
+			"MarshalText must write UTF-8, as encoding.TextMarshaler requires; %q is not", text)
+	}
+
+	require.False(t, targetOK,
+		"a symbol containing U+FFFD is the standing target of every encoder rewrite and must be unregistrable")
+	require.False(t, sourceOK,
+		"an invalid-UTF-8 symbol breaks the TextMarshaler contract and must be unregistrable")
+
+	for _, symbol := range []string{stem + "\xef\xbf\xbd", stem + "\xff"} {
+		_, ok := units.Lookup(symbol)
+		require.False(t, ok, "a rejected symbol %q registers nothing", symbol)
+	}
+}
+
+// hostileSymbolFragments are what a generated symbol is built from: the characters real
 // symbols are made of (letters, digits, carets, slashes, asterisks), the brackets of the
-// reserved namespace, the punctuation an application might reach for, Unicode, and every
-// class of whitespace the text grammar could trip over.
-var hostileSymbolRunes = []rune("aBcXyZ019^*/+-_.:,;%'\"()[]{}<>#&|\\?!$=@`µΩ°²³πÅ日\t\n\r\v\f \u0085\u00a0\u1680\u2003\u2028\u3000")
+// reserved namespace, the punctuation an application might reach for, Unicode, every
+// class of whitespace the text grammar could trip over — and the bytes an encoder
+// rewrites rather than carries: invalid UTF-8 sequences (a fragment is a byte string,
+// not a rune, so a symbol can be genuinely malformed), U+FFFD, control characters from
+// NUL through DEL to the C1 range, and the noncharacters U+FFFE and U+FFFF.
+var hostileSymbolFragments = func() []string {
+	fragments := []string{
+		// Invalid UTF-8 by construction: a lone high byte, a bare continuation, a
+		// truncated lead (which a following fragment may happen to complete into a
+		// valid rune — the property judges the assembled symbol, not the fragment),
+		// an overlong encoding, and a surrogate half.
+		"\xff", "\x80", "\xc3", "\xc0\xaf", "\xed\xa0\x80",
+	}
+	for _, r := range []rune{
+		// Whitespace beyond ASCII (NEL, NBSP, ogham, em space, line separator, the
+		// ideographic space); U+FFFD and the noncharacters; and controls from every
+		// range: NUL, a C0, ESC, DEL, a C1.
+		0x0085, 0x00a0, 0x1680, 0x2003, 0x2028, 0x3000,
+		0xfffd, 0xfffe, 0xffff,
+		0x0000, 0x0001, 0x001b, 0x007f, 0x0090,
+	} {
+		fragments = append(fragments, string(r))
+	}
+	for _, r := range "aBcXyZ019^*/+-_.:,;%'\"()[]{}<>#&|\\?!$=@`µΩ°²³πÅ日\t\n\r\v\f " {
+		fragments = append(fragments, string(r))
+	}
+	return fragments
+}()
+
+// unregistrable states the classes Define refuses, and nothing else: whitespace (the
+// text form's separator), the reserved "[" namespace, and what a text encoder rewrites
+// — invalid UTF-8, U+FFFD, a control character, the noncharacters U+FFFE and U+FFFF.
+// The property test asserts that Define's judgment and this predicate agree exactly.
+func unregistrable(symbol string) bool {
+	return strings.ContainsFunc(symbol, unicode.IsSpace) ||
+		strings.HasPrefix(symbol, "[") ||
+		!utf8.ValidString(symbol) ||
+		strings.ContainsFunc(symbol, func(r rune) bool {
+			return unicode.IsControl(r) || r == 0xfffd || r == 0xfffe || r == 0xffff
+		})
+}
 
 // hostileSymbols generates n plausible-but-hostile symbols. It names no expectation:
 // Define decides which of them are registrable, and the property below is asserted over
@@ -606,7 +722,7 @@ func hostileSymbols(n int) []string {
 	pick := func(length int) string {
 		var b strings.Builder
 		for range length {
-			b.WriteRune(hostileSymbolRunes[r.IntN(len(hostileSymbolRunes))])
+			b.WriteString(hostileSymbolFragments[r.IntN(len(hostileSymbolFragments))])
 		}
 		return b.String()
 	}
@@ -648,11 +764,12 @@ func tryDefine(symbol string, kind units.Kind, factor float64) (units.Unit, bool
 
 func TestValueTextRoundTripOverHostileSymbols(t *testing.T) {
 	// The property, not the instance: for every symbol Define accepts, what MarshalText
-	// writes UnmarshalText reads back — the same unit, and the same magnitude bit for bit.
-	// The two grammars are one grammar, and Define is where they are made to agree, so the
-	// symbols here are the ones a hand-written table would not have thought of.
+	// writes UnmarshalText reads back — and a JSON document delivers unchanged — the same
+	// unit, and the same magnitude bit for bit. The symbol grammar, the text grammar and
+	// the encoders' reach are made to agree at Define, so the symbols here are the ones a
+	// hand-written table would not have thought of.
 	accepted, rejected := 0, 0
-	for _, symbol := range hostileSymbols(4000) {
+	for _, symbol := range hostileSymbols(8000) {
 		if _, taken := units.Lookup(symbol); taken {
 			continue // already a unit; Define would panic on the duplicate, which is not the property
 		}
@@ -660,25 +777,29 @@ func TestValueTextRoundTripOverHostileSymbols(t *testing.T) {
 		u, ok := tryDefine(symbol, units.Length, 3)
 		if !ok {
 			rejected++
-			// A refusal registers nothing, and only an unreadable symbol (whitespace) or a
-			// reserved one (the "[" namespace) is refused — the factor and the kind are fine.
+			// A refusal registers nothing, and only an unreadable symbol (whitespace), a
+			// reserved one (the "[" namespace) or one a text encoder rewrites (invalid
+			// UTF-8, U+FFFD, a control, U+FFFE/U+FFFF) is refused — the factor and the
+			// kind are fine.
 			_, found := units.Lookup(symbol)
 			require.False(t, found, "a rejected symbol %q must not be registered", symbol)
-			require.True(t,
-				strings.ContainsFunc(symbol, unicode.IsSpace) || strings.HasPrefix(symbol, "["),
-				"%q is neither unreadable nor reserved, so Define must accept it", symbol)
+			require.True(t, unregistrable(symbol),
+				"%q is neither unreadable, nor reserved, nor corruptible by an encoder, so Define must accept it", symbol)
 			continue
 		}
 
 		accepted++
 		require.Equal(t, symbol, u.Symbol())
-		require.False(t, strings.ContainsFunc(symbol, unicode.IsSpace), "an accepted symbol carries no whitespace")
+		require.False(t, unregistrable(symbol),
+			"an accepted symbol %q carries nothing the form or an encoder mangles", symbol)
 
 		for _, m := range []float64{0, math.Copysign(0, -1), 1, -2.5, math.Pi, 1e307, math.MaxFloat64, 5e-324} {
 			v := units.New(m, u)
 
 			text, err := v.MarshalText()
 			require.NoError(t, err)
+			require.True(t, utf8.Valid(text),
+				"MarshalText must write UTF-8, as encoding.TextMarshaler requires; %q is not", text)
 			require.Equal(t, strconv.FormatFloat(v.Mag(), 'g', -1, 64)+" "+symbol, string(text),
 				"the text is the magnitude, a space, and the symbol")
 
@@ -689,6 +810,15 @@ func TestValueTextRoundTripOverHostileSymbols(t *testing.T) {
 			require.Equal(t, symbol, after, "%q carries the symbol as written", text)
 
 			requireTextRoundTrip(t, v)
+
+			// And through encoding/json, whose normalization is where a corruptible
+			// symbol would come back changed: the document must deliver the value
+			// bit-identically, unit and all.
+			doc, err := json.Marshal(step{Distance: v})
+			require.NoError(t, err)
+			var back step
+			require.NoError(t, json.Unmarshal(doc, &back), "%s must read back", doc)
+			sameValuef(t, v, back.Distance, "%s survives a JSON document", doc)
 		}
 	}
 

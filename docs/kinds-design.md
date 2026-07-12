@@ -485,11 +485,12 @@ than a switch, and returns `(Unit, bool)` — an unnamed kind like `L⁻¹` has 
 base unit registered, and fabricating one would be a lie. The `bool` is the
 honest part: the function has an answer it cannot always give.
 
-Unit symbols are ASCII, with a caret for an exponent, and carry **no whitespace**:
-`Define` panics on a symbol holding any (§6 — it is the text form's separator, so
-such a symbol could be written and never read). `Kind.String()` — Unicode
-superscripts, `L⁻¹`, and English names for named kinds — is **display text and
-never a unit symbol**.
+Unit symbols are ASCII, with a caret for an exponent, and carry **no whitespace**
+and **no rune a text encoder rewrites**: `Define` panics on a symbol holding
+either (§6 — whitespace is the text form's separator, and an encoder replaces
+what it cannot represent with U+FFFD, so such a symbol could be written and never
+read back unchanged). `Kind.String()` — Unicode superscripts, `L⁻¹`, and English
+names for named kinds — is **display text and never a unit symbol**.
 
 The registry behind `Define`/`Lookup` is guarded by a `sync.RWMutex`: an
 application may register its own units from any goroutine while others resolve
@@ -592,10 +593,13 @@ boundary where the quantity leaves the process.
 
 ### A registered symbol is a readable symbol
 
-The symbol grammar and the text grammar are **one grammar**, and they are made to agree
-at the one place a symbol enters the registry: **`Define`**. The form separates the
-magnitude from the symbol with a space, so a symbol carrying whitespace is one
-`MarshalText` could write and `UnmarshalText` could never read —
+A registered symbol must survive the round trip **byte-identically, through this
+package's own parser and through a standard text encoder alike**, and both rules are
+made to hold at the one place a symbol enters the registry: **`Define`**.
+
+The parser first. The symbol grammar and the text grammar are **one grammar**: the
+form separates the magnitude from the symbol with a space, so a symbol carrying
+whitespace is one `MarshalText` could write and `UnmarshalText` could never read —
 
 ```go
 units.Define("probe space", units.Length, 7)  // panics: the text parser cannot read it back
@@ -609,14 +613,35 @@ ideographic space) and registers nothing, as it does for a duplicate symbol, a r
 the ASCII space alone: whitespace is what separates the two halves of the form, and a
 symbol must be **one token** of it.
 
+The encoders second, because the text form exists to be carried by them, and they do
+not fail on text they cannot represent — they **rewrite it as U+FFFD and carry on**.
+`Define` therefore panics on:
+
+- a symbol that is **not valid UTF-8**. `encoding.TextMarshaler` is a contract to
+  produce UTF-8 text, and `encoding/json` replaces every invalid byte with U+FFFD, so
+  the bytes written are never the bytes read.
+- a symbol containing **U+FFFD** itself. It is the rune every lossy rewrite lands on:
+  registered, it would be a standing target — any other symbol, corrupted anywhere and
+  normalized by any encoder, would resolve to it, and a quantity would come back from a
+  document as a **different unit of a different kind**. Unregistrable, a rewrite can
+  only produce a symbol `Lookup` refuses (`ErrUnknownUnit`), never a wrong quantity.
+- a symbol containing a **control character** (any `unicode.IsControl` rune) or the
+  noncharacter **U+FFFE** or **U+FFFF**. XML 1.0 has no representation for them, so
+  `encoding/xml` — which carries a `Value` through this same text form — writes U+FFFD
+  in their place (`encoding/json` escapes and restores a control, but a symbol must
+  survive every encoder in the loop, not the friendliest). The control class is
+  rejected whole, as whitespace is, rather than admitting the corners of it today's
+  encoders happen to pass through.
+
 `One`'s **empty** symbol is the one symbol with no separator — a dimensionless value is
 the bare number — and it stays `One`'s: `Define("")` collides with the registered symbol
 and panics like any other duplicate.
 
 The invariant is enforced at **registration**, not at marshalling, and that is what makes
-the marshaller's guard sound: an unparseable symbol is *unregistrable*, so a `Lookup` that
-resolves a value's unit proves the round trip works. Guarding in `MarshalText` instead
-would leave the registry holding a symbol no document could carry.
+the marshaller's guard sound: a symbol the parser cannot read, or an encoder delivers
+changed, is *unregistrable*, so a `Lookup` that resolves a value's unit proves the round
+trip works. Guarding in `MarshalText` instead would leave the registry holding a symbol
+no document could carry.
 
 **A symbol this package emits is a symbol it can read — the check is `Lookup`
 itself.** Three values have no text form, and each is an **error** rather than a

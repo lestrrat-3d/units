@@ -119,11 +119,15 @@ var ErrUnknownUnit = errors.New("units: unknown unit symbol")
 // to be. The library holds that 25.4 mm is exactly 1 in, and a text form that lost a
 // bit would give that up at the document boundary.
 //
-// And every registered symbol is one this parser can read: the separator is a space, so
-// [Define] panics on a symbol carrying whitespace and the registry never holds one. The
-// two halves of the form are the same grammar — a symbol that could be written and not
-// read is unregistrable — which is why [Lookup] resolving a unit is all
-// [Value.MarshalText] checks.
+// And every registered symbol is one this parser — and the encoder around it — can
+// carry back byte-identically. The separator is a space, so [Define] panics on a symbol
+// carrying whitespace; and an encoder rewrites what it cannot represent as U+FFFD
+// rather than fail, so Define also panics on a symbol that is not valid UTF-8, one
+// containing U+FFFD (the rune every such rewrite lands on — registered, it would be the
+// alias every corrupted document resolves to), a control character, or the
+// noncharacters U+FFFE and U+FFFF. A symbol that could be written and not read back is
+// unregistrable — which is why [Lookup] resolving a unit is all [Value.MarshalText]
+// checks.
 //
 // Three values have no text form, and each is an error rather than a symbol that could
 // never be read back: one of an unnamed kind ([ErrUnnamedKind]), one whose kind has
@@ -691,10 +695,14 @@ func (v Value) String() string {
 // [Value.UnmarshalText], which reads exactly what this writes, and the text form
 // described on [Value].
 //
-// It never writes a text [Value.UnmarshalText] cannot read back, and it needs only the
-// registry to know it: [Define] rejects every symbol the parser cannot read — one
-// carrying whitespace, which is the form's separator — so a registered symbol is a
-// readable symbol, and a [Lookup] that resolves the value's unit is the whole guard.
+// It never writes a text [Value.UnmarshalText] cannot read back — nor one a standard
+// text encoder delivers changed — and it needs only the registry to know it: [Define]
+// rejects every symbol the parser cannot read (one carrying whitespace, which is the
+// form's separator) and every symbol an encoder rewrites (invalid UTF-8, U+FFFD, a
+// control character, U+FFFE, U+FFFF), so a registered symbol survives the parser and
+// the encoder alike, byte-identically, and a [Lookup] that resolves the value's unit
+// is the whole guard. Its output is therefore always valid UTF-8, as
+// [encoding.TextMarshaler] requires.
 //
 // It reports an error rather than write a text that cannot be read back:
 //
@@ -716,8 +724,9 @@ func (v Value) MarshalText() ([]byte, error) {
 	}
 
 	// Lookup is sufficient, and no separate check of the symbol's shape is needed:
-	// [Define] admits no symbol UnmarshalText cannot read (see [hasWhitespace]), so the
-	// registry holds only readable symbols — the empty one of [One], whose value is the
+	// [Define] admits no symbol UnmarshalText cannot read (see [hasWhitespace]) and none
+	// a text encoder rewrites (see [hasEncoderUnsafeRune]), so the registry holds only
+	// symbols that survive the whole trip — the empty one of [One], whose value is the
 	// bare magnitude, included. The unit must be the registered one and not merely share
 	// its symbol: a synthetic unit of an unnamed kind carries a bracketed symbol, which
 	// is registered by nothing.

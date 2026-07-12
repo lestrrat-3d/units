@@ -6,6 +6,7 @@ import (
 	"strings"
 	"sync"
 	"unicode"
+	"unicode/utf8"
 )
 
 // Unit is a unit of measure. Units are values, compared by identity of their
@@ -18,9 +19,12 @@ import (
 // A symbol opening with "[" is reserved for the library's synthetic units (see
 // [Define]).
 //
-// A registered symbol carries no whitespace, so it is a symbol the text form can read
-// back: [Define] rejects one that [Value.UnmarshalText] could not parse. [One]'s symbol
-// is the empty one, and a dimensionless value is written as the bare magnitude.
+// A registered symbol is one the text form can carry back byte-identically, through
+// this package's own parser and through a standard text encoder alike: [Define]
+// rejects a symbol [Value.UnmarshalText] could not parse (one carrying whitespace,
+// the form's separator) and one an encoder would rewrite (invalid UTF-8, U+FFFD, a
+// control character, the noncharacters U+FFFE and U+FFFF). [One]'s symbol is the
+// empty one, and a dimensionless value is written as the bare magnitude.
 //
 // Every unit's factor is positive and finite ([Define] rejects anything else),
 // so a conversion through a unit is always well defined. The zero Unit is [One]:
@@ -177,9 +181,49 @@ func hasWhitespace(symbol string) bool {
 	return strings.IndexFunc(symbol, unicode.IsSpace) >= 0
 }
 
+// hasEncoderUnsafeRune reports whether symbol carries a rune the standard text
+// encoders do not deliver byte-identically. The text form exists so that
+// encoding/json and encoding/xml can carry a [Value], and neither fails on text
+// it cannot represent — each rewrites it as U+FFFD and carries on. A symbol
+// containing such a rune is one [Value.MarshalText] writes and the decoder hands
+// back changed: the whitespace failure again, one encoder further out.
+//
+// The runes are read straight off what the encoders do:
+//
+//   - U+FFFD itself. It is the rune every lossy rewrite lands on, so a registered
+//     symbol containing it would be a standing target: any other symbol, corrupted
+//     anywhere and normalized by any encoder, would resolve to it — and a quantity
+//     would come back from a document as a different unit of a different kind.
+//     With it unregistrable, a rewrite can only produce a symbol [Lookup] refuses.
+//   - A control character ([unicode.IsControl]). XML 1.0 has no representation
+//     for a C0 control, so encoding/xml writes U+FFFD in its place (encoding/json
+//     escapes and restores one, but a symbol must survive every encoder in the
+//     loop, not the friendliest). The class is rejected whole — DEL and the C1
+//     range with it — for the whitespace rule's reason: a control character is
+//     not text a document format promises to carry, and "no controls" is a
+//     boundary that does not move with the encoder list.
+//   - The noncharacters U+FFFE and U+FFFF, which are no XML characters either:
+//     encoding/xml writes U+FFFD for them too.
+func hasEncoderUnsafeRune(symbol string) bool {
+	return strings.ContainsFunc(symbol, func(r rune) bool {
+		return unicode.IsControl(r) || r == '\uFFFD' || r == '\uFFFE' || r == '\uFFFF'
+	})
+}
+
 func define(symbol string, kind Kind, factor float64) Unit {
+	// Valid UTF-8 first: encoding.TextMarshaler is a contract to produce UTF-8
+	// text, so a symbol that is not UTF-8 breaks MarshalText's contract outright —
+	// and encoding/json replaces every invalid byte with U+FFFD, so the bytes
+	// written are never the bytes read. It also makes the rune checks below
+	// well-defined.
+	if !utf8.ValidString(symbol) {
+		panic("units: unit symbol must be valid UTF-8: " + strconv.Quote(symbol))
+	}
 	if hasWhitespace(symbol) {
 		panic("units: unit symbol must not contain whitespace: " + strconv.Quote(symbol))
+	}
+	if hasEncoderUnsafeRune(symbol) {
+		panic("units: unit symbol must not contain a rune a text encoder rewrites: " + strconv.Quote(symbol))
 	}
 	if strings.HasPrefix(symbol, "[") {
 		panic("units: unit symbol namespace is reserved: " + strconv.Quote(symbol))
@@ -212,20 +256,39 @@ func defineBase(symbol string, kind Kind) Unit {
 // convert to the kind's base unit by multiplying by factorToBase. It enables
 // callers to extend the built-in set (e.g. a "yard").
 //
-// # Every registered symbol is one the text form can read back
+// # Every registered symbol is one the text form can carry back
 //
-// The symbol must hold no whitespace — no space, tab, newline, carriage return,
-// vertical tab, form feed, or any other [unicode.IsSpace] rune: Define panics on one,
-// and the empty symbol, which is [One]'s, is registered already. That is the text
-// grammar, enforced where a symbol enters the registry rather than where one is
-// written. [Value.MarshalText] renders a value as "<magnitude> <symbol>" and
-// [Value.UnmarshalText] cuts the text at the first space, so a symbol carrying one
-// could be written and never read: "3 probe space" is a magnitude and two tokens, and
-// the value is lost at the document boundary.
+// A registered symbol must survive the round trip byte-identically, through this
+// package's own parser and through a standard text encoder alike. Define enforces
+// both where a symbol enters the registry rather than where one is written, and
+// panics on a symbol that fails either.
 //
-// So a symbol [Lookup] resolves is a symbol [Value.UnmarshalText] can read, and
-// MarshalText's [Lookup] guard is the whole of what it needs: registered means
-// readable, by construction.
+// The parser: the symbol must hold no whitespace — no space, tab, newline, carriage
+// return, vertical tab, form feed, or any other [unicode.IsSpace] rune — and the
+// empty symbol, which is [One]'s, is registered already. [Value.MarshalText] renders
+// a value as "<magnitude> <symbol>" and [Value.UnmarshalText] cuts the text at the
+// first space, so a symbol carrying one could be written and never read: "3 probe
+// space" is a magnitude and two tokens, and the value is lost at the document
+// boundary.
+//
+// The encoders: the symbol must be valid UTF-8, and it must carry no rune a text
+// encoder rewrites. [encoding.TextMarshaler] is a contract to produce UTF-8 text,
+// and an encoder does not fail on text that is not — encoding/json replaces every
+// invalid byte with U+FFFD and carries on, so the bytes written are never the bytes
+// read. U+FFFD itself is refused as the other half of that rewrite: it is the rune
+// every lossy normalization lands on, so a registered symbol containing it would be
+// a standing target that any corrupted document resolves to — a quantity coming
+// back from a document as a different unit of a different kind, which is the one
+// failure this library exists to prevent. And a control character (any
+// [unicode.IsControl] rune) or the noncharacter U+FFFE or U+FFFF is refused because
+// encoding/xml — which carries a [Value] through the same text form — has no
+// representation for one and writes U+FFFD in its place; the control class is
+// rejected whole, as whitespace is, rather than admitting the corners of it
+// today's encoders happen to pass through.
+//
+// So a symbol [Lookup] resolves is a symbol [Value.UnmarshalText] can read and a
+// standard encoder delivers untouched, and MarshalText's [Lookup] guard is the
+// whole of what it needs: registered means readable, by construction.
 //
 // The symbol must be unique: Define panics if it is already registered.
 // Redefining a symbol would change the meaning of every value that names it,
