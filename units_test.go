@@ -431,6 +431,49 @@ func TestDefineRejectsBadFactor(t *testing.T) {
 	require.InDelta(t, 1e-9, u.Factor(), 0)
 }
 
+func TestDefineRejectsOverflowedKind(t *testing.T) {
+	// An overflowed kind is a programming error made visible: it has no base unit
+	// and is carried only by the unregistered synthetic symbol "[overflow]", so it
+	// can be neither resolved nor persisted. Registering one under an ordinary
+	// symbol would launder it into a legitimate, resolvable, persistable unit — so
+	// Define refuses it, as it refuses a duplicate symbol or an unusable factor.
+	for _, tc := range []struct {
+		name   string
+		symbol string
+		kind   units.Kind
+	}{
+		{"Pow past the exponent range", "zz-ovf-pow", units.Length.Pow(math.MaxInt64)},
+		{"Pow the other way", "zz-ovf-negpow", units.Length.Pow(math.MinInt64)},
+		{"Mul that saturates", "zz-ovf-mul", units.Length.Pow(120).Mul(units.Length.Pow(120))},
+		{"Div that saturates", "zz-ovf-div", units.Length.Pow(-120).Div(units.Length.Pow(120))},
+		{"sticky: composed back to zero exponents", "zz-ovf-sticky",
+			units.Length.Pow(math.MaxInt64).Div(units.Length.Pow(math.MaxInt64))},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			require.True(t, tc.kind.Overflowed(), "the premise: the kind has overflowed")
+
+			require.Panics(t, func() { units.Define(tc.symbol, tc.kind, 1) },
+				"Define refuses an overflowed kind")
+			require.Panics(t, func() { units.Define(tc.symbol, tc.kind, 25.4) },
+				"…whatever the factor")
+
+			// Nothing may survive the rejection: not the symbol, not a base unit.
+			_, ok := units.Lookup(tc.symbol)
+			require.False(t, ok, "a rejected unit must not be registered")
+			_, ok = units.BaseUnit(tc.kind)
+			require.False(t, ok, "and an overflowed kind still has no base unit")
+		})
+	}
+
+	// The kind that merely looks exotic is not the kind that overflowed: an L¹²⁰ is
+	// an int8 exponent, and a unit of it registers as any other does.
+	require.False(t, units.Length.Pow(120).Overflowed())
+	u := units.Define("zz-L120b", units.Length.Pow(120), 1)
+	got, ok := units.Lookup("zz-L120b")
+	require.True(t, ok)
+	require.Equal(t, u, got)
+}
+
 func TestRegistryConcurrent(t *testing.T) {
 	// Define writes the registry that Lookup and BaseUnit read. An application may
 	// register its units from one goroutine while another deserializes symbols, so
@@ -2445,4 +2488,160 @@ func TestEqualDecidesOnTheTrueDifference(t *testing.T) {
 			require.True(t, p[1].Equal(p[0], 0), "…in either order")
 		}
 	})
+}
+
+func TestEqualNonFiniteMagnitudes(t *testing.T) {
+	// New, FromBase, Scale and Neg have no error to report, so a Value can be built
+	// whose magnitude is an infinity or a NaN. It is not a quantity: it has no true
+	// difference from one, so no tolerance — not even an infinite one — may admit it
+	// beside one. The one pair that is equal is a value and the same signed infinity,
+	// which keeps Equal reflexive for a value built from an infinity on purpose.
+
+	t.Run("the reproducer", func(t *testing.T) {
+		// An infinite length is not one millimetre, at any tolerance a caller can pass.
+		inf, one := units.New(math.Inf(1), units.Millimeter), units.Millimeters(1)
+		require.False(t, inf.Equal(one, math.Inf(1)), "an infinite length is not 1 mm")
+		require.False(t, one.Equal(inf, math.Inf(1)), "…nor the other way round")
+		for _, tol := range nonFiniteEqualTols() {
+			require.False(t, inf.Equal(one, tol), "…at tol %v either", tol)
+			require.False(t, one.Equal(inf, tol), "…in either order")
+		}
+
+		// +Inf is not −Inf, and a NaN is nothing at all — not even itself.
+		neg := units.New(math.Inf(-1), units.Millimeter)
+		nan := units.New(math.NaN(), units.Millimeter)
+		require.False(t, inf.Equal(neg, math.Inf(1)), "+Inf mm is not −Inf mm")
+		require.False(t, nan.Equal(nan, math.Inf(1)), "a NaN magnitude equals nothing, itself included")
+
+		// …while the same signed infinity is the same non-quantity, so Equal stays
+		// reflexive for a value someone constructed with an infinity.
+		require.True(t, inf.Equal(inf, 0), "+Inf mm equals itself")
+		require.True(t, inf.Equal(units.New(math.Inf(1), units.Millimeter), 1e-9), "…however it was built")
+		require.True(t, neg.Equal(neg, math.Inf(1)), "and so does −Inf mm")
+	})
+
+	t.Run("a different kind is never equal", func(t *testing.T) {
+		for _, m := range nonFiniteMags() {
+			a, b := units.New(m, units.Millimeter), units.New(m, units.Radian)
+			for _, tol := range nonFiniteEqualTols() {
+				require.False(t, a.Equal(b, tol), "%s is not %s at tol %v", a, b, tol)
+				require.False(t, b.Equal(a, tol), "…nor the other way round")
+			}
+		}
+	})
+
+	t.Run("against the specified truth table", func(t *testing.T) {
+		// The whole matrix: every magnitude — the infinities, the NaN and the finite
+		// ones — in every pair of length units, at every tolerance, in both operand
+		// orders. The expectation comes from the rules, computed from the operands'
+		// own magnitudes and factors, never from an expression in the code under test.
+		leaks := 0
+		mags := append(nonFiniteMags(), equalSweepMags()...)
+		us := equalSweepUnits(units.Length)
+
+		for _, ua := range us {
+			for _, ub := range us {
+				for _, ma := range mags {
+					for _, mb := range mags {
+						a, b := units.New(ma, ua), units.New(mb, ub)
+						for _, tol := range nonFiniteEqualTols() {
+							want := nonFiniteEqualOracle(t, a, b, tol)
+							got, swapped := a.Equal(b, tol), b.Equal(a, tol)
+							if got == want && swapped == want {
+								continue
+							}
+							leaks++
+							if leaks <= 10 {
+								t.Errorf("Equal(%s, %s, %v) = %v, %v; the rules say %v",
+									a, b, tol, got, swapped, want)
+							}
+						}
+					}
+				}
+			}
+		}
+		require.Zero(t, leaks, "%d pairs where Equal disagreed with the rules", leaks)
+	})
+
+	t.Run("symmetry and reflexivity across the matrix", func(t *testing.T) {
+		mags := append(nonFiniteMags(), equalSweepMags()...)
+		us := equalSweepUnits(units.Length)
+
+		for _, ua := range us {
+			for _, ub := range us {
+				for _, ma := range mags {
+					a := units.New(ma, ua)
+					for _, tol := range nonFiniteEqualTols() {
+						// Reflexivity: every finite value equals itself at every tol >= 0,
+						// and so does a value carrying a signed infinity. A NaN equals
+						// nothing.
+						if tol >= 0 {
+							switch {
+							case math.IsNaN(ma):
+								require.False(t, a.Equal(a, tol), "%s equals nothing, itself included", a)
+							default:
+								require.True(t, a.Equal(a, tol), "%s equals itself at tol %v", a, tol)
+							}
+						}
+
+						for _, mb := range mags {
+							b := units.New(mb, ub)
+							require.Equal(t, a.Equal(b, tol), b.Equal(a, tol),
+								"Equal is symmetric: %s, %s at tol %v", a, b, tol)
+						}
+					}
+				}
+			}
+		}
+	})
+}
+
+// nonFiniteMags are the magnitudes that are not quantities: a Value can carry one,
+// because New and FromBase have no error to report, and Equal must never find one
+// within a tolerance of an ordinary quantity.
+func nonFiniteMags() []float64 {
+	return []float64{math.Inf(1), math.Inf(-1), math.NaN()}
+}
+
+// nonFiniteEqualTols are the tolerances the non-finite matrix is judged at: the
+// ones a caller passes, and the ones that are not bounds on a real difference at
+// all — a negative tolerance, a NaN, and the infinities.
+func nonFiniteEqualTols() []float64 {
+	return []float64{
+		math.Inf(-1), math.NaN(), -1, 0, 5e-324, 1e-9, 1, 1e300, math.MaxFloat64, math.Inf(1),
+	}
+}
+
+// nonFiniteEqualOracle is the specified answer, read off the rules rather than off
+// the code under test: a NaN magnitude is equal to nothing, a lone infinity is
+// equal to nothing, two infinities are equal exactly when they carry the same sign
+// (a unit's factor is positive, so the magnitude's sign is the quantity's), a
+// tolerance that is negative or a NaN admits nothing, an infinite tolerance admits
+// every pair of finite quantities of the kind — and two finite magnitudes are
+// decided on the true difference, in exact rationals.
+func nonFiniteEqualOracle(t *testing.T, a, b units.Value, tol float64) bool {
+	t.Helper()
+
+	if a.Kind() != b.Kind() {
+		return false
+	}
+
+	ma, mb := a.Mag(), b.Mag()
+	if math.IsNaN(ma) || math.IsNaN(mb) {
+		return false
+	}
+	if math.IsInf(ma, 0) || math.IsInf(mb, 0) {
+		if math.IsInf(ma, 0) && math.IsInf(mb, 0) {
+			return math.Signbit(ma) == math.Signbit(mb) && !math.IsNaN(tol) && tol >= 0
+		}
+		return false
+	}
+
+	if math.IsNaN(tol) || tol < 0 {
+		return false
+	}
+	if math.IsInf(tol, 1) {
+		return true
+	}
+	return equalOracle(t, a, b, tol)
 }

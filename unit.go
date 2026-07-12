@@ -159,6 +159,9 @@ func define(symbol string, kind Kind, factor float64) Unit {
 	if factor <= 0 || math.IsInf(factor, 0) || math.IsNaN(factor) {
 		panic("units: unit factor must be positive and finite: " + strconv.FormatFloat(factor, 'g', -1, 64))
 	}
+	if kind.Overflowed() {
+		panic("units: unit kind has overflowed: " + strconv.Quote(symbol))
+	}
 
 	registryMu.Lock()
 	defer registryMu.Unlock()
@@ -195,6 +198,14 @@ func defineBase(symbol string, kind Kind) Unit {
 // infinite or NaN factor. Such a unit could not convert — every magnitude
 // expressed in it would come back as an infinity or a NaN — so it, too, is a
 // programming error rather than an exotic unit.
+//
+// kind must not have overflowed ([Kind.Overflowed]): Define panics on one. An
+// overflowed kind is a programming error made visible — its exponents are clamped
+// stand-ins, it has no base unit, and it is carried only by the unregistered
+// synthetic symbol "[overflow]" — so registering it under an ordinary symbol
+// would launder it into a legitimate, resolvable, persistable unit.
+//
+// Nothing is registered when Define panics: the symbol stays free.
 //
 // Define is safe to call from multiple goroutines, concurrently with [Lookup]
 // and [BaseUnit].

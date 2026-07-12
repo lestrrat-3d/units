@@ -77,6 +77,16 @@ It is a **foundation module**: consumed by `github.com/lestrrat-3d/sketch` and
   rationals wherever float64 cannot hold it, with the fast path kept only where it is
   lossless (both operands in the same unit: equal quantities iff equal magnitudes).
   Symmetry and reflexivity follow from the difference being the true one.
+- **A non-finite magnitude is NOT a quantity, and `Equal` never puts one beside
+  one.** `New`/`FromBase`/`Scale`/`Neg` can build a `Value` carrying an `±Inf` or a
+  `NaN`, so `Equal` answers it from the magnitudes, before any arithmetic: exactly
+  one non-finite → **false at every `tol`, `+Inf` included** (there is no real
+  difference for a tolerance to bound); both infinite → true iff the **same signed
+  infinity** (a factor is positive, so the magnitude's sign is the quantity's), which
+  is what keeps `Equal` reflexive for a value built from an infinity; either a `NaN`
+  → false, itself included. A `tol` that is negative or a `NaN` admits nothing.
+  NEVER let this reach the float path, where `|Inf − 1|` is `+Inf` (which an infinite
+  `tol` admits) and `|Inf − Inf|` a `NaN` (which breaks reflexivity).
 - **`tol == 0` means the same real number — and two units generally do not agree on
   one.** A unit's factor is itself a *rounded* float64, so `Degrees(180)` and
   `Radians(math.Pi)` are different quantities (`Degree`'s factor is a rounded
@@ -128,7 +138,10 @@ It is a **foundation module**: consumed by `github.com/lestrrat-3d/sketch` and
   clears. Without it, `Length.Pow(math.MaxInt64).Div(Length.Pow(126))` would come
   back as `Length` — an astronomically overflowed quantity wearing a plausible
   kind. An overflowed kind equals no named kind, prints `overflowed`, has no base
-  unit, and carries the reserved synthetic symbol `[overflow]`. Keep `Kind`
+  unit, and carries the reserved synthetic symbol `[overflow]`. **`Define` panics
+  on one**, registering nothing: it takes a `Kind` from the caller, and a
+  registered symbol is a symbol `Lookup` resolves and a document persists — the
+  one way an overflowed kind could be laundered into an ordinary unit. Keep `Kind`
   comparable and its zero value `Dimensionless`.
 
 ## Layout

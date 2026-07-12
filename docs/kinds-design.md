@@ -342,6 +342,33 @@ should have. The suite asserts this against the same `big.Rat` oracle, at `tol =
 and at tolerances down among the subnormals, over operands chosen so that a rescale
 would underflow their difference to nothing.
 
+**A non-finite magnitude is not a quantity, so it has no difference from one.**
+`New`, `FromBase`, `Scale` and `Neg` have no error to return, so a `Value` can be
+built carrying an infinity or a `NaN`, and `Equal` has to say what one is worth. It
+is worth nothing beside a real quantity — a tolerance bounds the difference of two
+real numbers, and there is no such difference here — so the rules are read off the
+magnitudes before any arithmetic:
+
+| `v.mag` | `o.mag` | `Equal(o, tol)` |
+|---|---|---|
+| finite | finite | `\|v − o\| <= tol` on the **true** difference, as above |
+| non-finite | finite | **false**, at every `tol` — `+Inf` included |
+| `+Inf` | `+Inf` (or `−Inf` and `−Inf`) | **true** for `tol >= 0` — a factor is positive, so the magnitude's sign is the quantity's |
+| `+Inf` | `−Inf` | **false** |
+| `NaN` | anything (itself included) | **false** — a `NaN` is equal to nothing, the IEEE rule |
+
+```go
+units.New(math.Inf(1), units.Millimeter).Equal(units.Millimeters(1), math.Inf(1))  // false
+units.New(math.Inf(1), units.Millimeter).Equal(units.New(math.Inf(1), units.Meter), 0)  // true
+```
+
+The same-signed-infinity row is what keeps `Equal` **reflexive** for a value someone
+constructed with `New(math.Inf(1), …)` on purpose; left to the float arithmetic it
+would be `|Inf − Inf|`, a `NaN`, and false. A `tol` that is negative or a `NaN` is no
+bound on any difference and admits nothing; `tol == +Inf` admits every pair of
+**finite** quantities of the kind, and nothing else. Symmetry holds across the whole
+table: every row reads the two magnitudes, and neither of them is the receiver.
+
 ### An overflowed exponent is sticky
 
 Exponents **saturate**, never wrap: `Pow` answers an out-of-range multiplier with
@@ -381,7 +408,21 @@ downstream answer follows from the flag alone:
   is `[overflow]` — ASCII, in the reserved bracketed namespace, and resolvable by
   nothing;
 - `System.UnitFor` hands back that same unit, of that same kind, so presentation
-  cannot turn it into a length or a bare number either.
+  cannot turn it into a length or a bare number either;
+- **`Define` panics on one**, and registers nothing.
+
+That last one closes the way out. Everything above keeps an overflowed kind
+unregistered and unresolvable — but `Define` takes a `Kind` from the caller, and
+without the check it would mint an ordinary, registered, persistable unit of it:
+
+```go
+units.Define("ovf", units.Length.Pow(math.MaxInt64), 1)  // panics: the kind has overflowed
+```
+
+A symbol `Lookup` resolves is a symbol a document can carry, and the quantity it
+would carry is the one the overflow mark exists to disown. It is a programming
+error, like a duplicate symbol or a zero factor, and it is answered the same way:
+a panic, with nothing registered — the symbol stays free.
 
 An out-of-range composition is a programming error, and it must look like one for
 as long as it lives.

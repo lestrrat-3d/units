@@ -243,6 +243,12 @@ func (v Value) Div(o Value) (Value, error) {
 // isFinite reports whether x is a real number: neither an infinity nor a NaN.
 func isFinite(x float64) bool { return !math.IsInf(x, 0) && !math.IsNaN(x) }
 
+// sameInfinity reports whether a and b are the same signed infinity. A NaN is
+// neither, so it is the same as nothing — itself included.
+func sameInfinity(a, b float64) bool {
+	return (math.IsInf(a, 1) && math.IsInf(b, 1)) || (math.IsInf(a, -1) && math.IsInf(b, -1))
+}
+
 // The four helpers below are how every operation on a [Value] does its
 // arithmetic, and no operation may bypass them by forming a base magnitude
 // ([Value.Base], a magnitude times its unit's factor) as an intermediate: that
@@ -462,6 +468,26 @@ func (v Value) Neg() Value { return Value{-v.mag, v.unit} }
 // wherever the float64 arithmetic cannot hold the difference the comparison is
 // made in exact rationals; see [sum], which reads the same rule.
 //
+// # A non-finite magnitude is not a quantity
+//
+// [New], [FromBase], [Value.Scale] and [Value.Neg] have no error to report, so a
+// Value can be built whose magnitude is an infinity or a NaN. It is not a
+// quantity, and it has no difference from one:
+//
+//   - Exactly one magnitude non-finite: false, at every tol, +Inf included. An
+//     infinite length is not within any tolerance of a finite one; a tolerance is
+//     a bound on the difference of two real numbers, and there is none here.
+//   - Both magnitudes infinite: true exactly when they are the same signed
+//     infinity (a factor is positive, so the sign of the magnitude is the sign of
+//     the quantity) — so a value built with New(math.Inf(1), …) still equals
+//     itself, and +Inf never equals −Inf.
+//   - Either magnitude a NaN: false, always, including against itself. A NaN is
+//     equal to nothing, which is the IEEE rule.
+//
+// A tol that is negative or a NaN is no bound on any difference and admits
+// nothing, non-finite magnitudes included; tol == +Inf admits every pair of
+// finite quantities of the same kind, and nothing else.
+//
 // # What tol == 0 means
 //
 // A tolerance of zero asks whether the two quantities are exactly the same real
@@ -480,18 +506,17 @@ func (v Value) Equal(o Value, tol float64) bool {
 	}
 	vu, ou := v.Unit(), o.Unit()
 
-	// An infinity or a NaN magnitude has no exact rational, and keeps the float
-	// path, where it propagates as it would through the plain arithmetic: |Inf − Inf|
-	// is a NaN, and NaN <= tol is false. The common unit is chosen by a property of
-	// the pair — the larger factor — and so by nothing that depends on which operand
-	// is the receiver.
+	// A magnitude that is not finite is not a quantity: it has no true difference
+	// from one, and so no tolerance — not even an infinite one — can admit it beside
+	// one. It is answered here, before any arithmetic, rather than left to a float
+	// path where |Inf − Inf| is a NaN and |Inf − 1| is the +Inf that an infinite tol
+	// would let through. The one pair that is equal is a value and the same signed
+	// infinity: reflexivity, for a value someone built from an infinity on purpose.
+	// A factor is positive, so the sign of the magnitude is the sign of the quantity,
+	// and the answer reads the two magnitudes alone — nothing about which operand is
+	// the receiver.
 	if !exactly(v.mag, o.mag) {
-		cu := vu
-		if ou.factor > vu.factor {
-			cu = ou
-		}
-		d := rescale(v.mag, vu.factor, cu.factor) - rescale(o.mag, ou.factor, cu.factor)
-		return math.Abs(rescale(d, cu.factor, 1)) <= tol
+		return sameInfinity(v.mag, o.mag) && tol >= 0
 	}
 
 	// The fast path, kept where it is provably lossless: two operands carried in the
