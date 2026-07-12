@@ -56,17 +56,25 @@ It is a **foundation module**: consumed by `github.com/lestrrat-3d/sketch` and
   `Frexp`/`Ldexp` split buys range, and it MUST NOT be paid for in accuracy: the
   mantissas are combined in the same order, and grouped the same way, as the plain
   `mag * from / to` and `(a * af) * (b * bf)` — reassociating them adds a rounding,
-  and `25.4 mm` stops being exactly `1 in`. Nor may the scale go back on with a
-  bare `Ldexp` of the combined mantissa: that rounds the mantissa to 53 bits and
-  then rounds **again** into the subnormal range, and a double-rounded result is
-  worse than the plain expression, which rounds once (`Scalar(1.25).Div(
-  Centimeters(1e307))` is `1.25e-308`, not a bit less). `assembleMul`/`assembleDiv`
-  own that step: exact while the result is normal, and split across the two sides
-  where it is subnormal, so the last operation rounds once. The suite asserts
-  exactness and a no-worse-than-naive ulp bound against a `big.Rat` oracle, over
-  the extremes (subnormals, `1e308`, `MaxFloat64`, `Define`d factors of `1e±300`)
-  as well as everyday magnitudes; a relative tolerance (even `1e-9`, some `10⁷`
-  ulps) cannot gate this class, so NEVER assert an accuracy claim with one.
+  and `25.4 mm` stops being exactly `1 in`. The suite asserts exactness and a
+  no-worse-than-naive ulp bound against a `big.Rat` oracle, over the extremes
+  (subnormals, `1e308`, `MaxFloat64`, `Define`d factors of `1e±300`) as well as
+  everyday magnitudes; a relative tolerance (even `1e-9`, some `10⁷` ulps) cannot
+  gate this class, so NEVER assert an accuracy claim with one.
+- **A rounded mantissa MUST NOT decide a boundary.** A mantissa rounded to 53 bits
+  while its exponent is still carried separately cannot see the ends of the range:
+  it cannot overflow (so a true product past the last float64 assembles into a
+  finite `MaxFloat64` with a **nil error** — the poisoned document), it can round
+  **up** over the boundary (so a representable quotient assembles into `+Inf` and
+  is refused), and `Ldexp` rounds it a **second** time into the subnormals (worse
+  than the plain expression, which rounds once: `Scalar(1.25).Div(Centimeters(
+  1e307))` is `1.25e-308`, not a bit less). So past a binary exponent of `±1000`
+  (`atTheEnds`, twenty-odd binades clear of every boundary) `rescale`/`product`/
+  `quotient` redo the arithmetic in exact rationals (`math/big`) and round **once**
+  — correctly rounded, an infinity exactly when the true result is past the last
+  float64. There is **no ambiguous band** near `MaxFloat64`: the oracle decides
+  every point, and the suite sweeps the boundary at both signs. NEVER write a test
+  that declares that band untestable.
 - **NEVER hand back a finite number in a unit it is not in.** `System.In` answers
   in `UnitFor(v.Kind())` — always. A magnitude that unit cannot hold comes back
   as the infinity it is; `System.Display` returns a value it cannot carry in the

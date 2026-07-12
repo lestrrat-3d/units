@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"math/big"
 	"strconv"
 )
 
@@ -27,6 +28,11 @@ var ErrDivideByZero = errors.New("units: division by zero")
 // whose own base magnitude overflows — [Meters](1e307), whose [Value.Base] is
 // +Inf — is an ordinary operand, and an operation on it whose result is in range
 // returns that result.
+//
+// And it is the true result that decides, at both ends of the range: an error
+// exactly when the exact value of the operation is past the last float64, and the
+// correctly rounded value — MaxFloat64 itself included — when it is not. Neither
+// end is a matter of which way an intermediate happened to round.
 //
 // The operations that cannot report an error — [New], [FromBase], [Value.Scale]
 // and [Value.Neg] — do not check: a caller that hands them an infinity, or that
@@ -190,8 +196,9 @@ func isAngleScalarPair(a, b Kind) bool {
 // product is the result's magnitude).
 //
 // The product is finite whenever the product itself is representable — an
-// operand whose own base magnitude overflows is no obstacle. A product that
-// genuinely overflows to an infinity, or that is a NaN, is [ErrNotFinite].
+// operand whose own base magnitude overflows is no obstacle, and a true product
+// that lands on the last float64 is that float64. A product whose true value is
+// past the last float64, or that is a NaN, is [ErrNotFinite].
 func (v Value) Mul(o Value) (Value, error) {
 	p := product(v.mag, v.Unit().factor, o.mag, o.Unit().factor)
 	if !isFinite(p) {
@@ -206,9 +213,11 @@ func (v Value) Mul(o Value) (Value, error) {
 // result's magnitude).
 //
 // The quotient is finite whenever the quotient itself is representable — a value
-// divided by itself is 1 however large or small its base magnitude. A zero
-// divisor is [ErrDivideByZero], and a divisor small enough — or a dividend large
-// enough — to blow the quotient up to an infinity or a NaN is [ErrNotFinite].
+// divided by itself is 1 however large or small its base magnitude, and a true
+// quotient that lands on the last float64 is that float64. A zero divisor is
+// [ErrDivideByZero], and a divisor small enough — or a dividend large enough — to
+// carry the true quotient past the last float64, or to make it a NaN, is
+// [ErrNotFinite].
 func (v Value) Div(o Value) (Value, error) {
 	// The divisor's own magnitude is the guard, never its base magnitude: a unit's
 	// factor is positive and finite, so a magnitude is zero exactly when the
@@ -235,88 +244,96 @@ func isFinite(x float64) bool { return !math.IsInf(x, 0) && !math.IsNaN(x) }
 // underflows for one such as [Grams](1e-322), even where the operation's own
 // result is perfectly representable.
 //
-// Each splits its operands with [math.Frexp] into a mantissa in [0.5, 1) and a
-// binary exponent, combines the mantissas — a bounded handful of them, so their
-// product can neither overflow nor underflow, and every intermediate keeps its
-// full 53 bits — sums the exponents as ints, and puts the scale back with
-// [math.Ldexp]. Only the last step can leave the float64 range, and it does so
-// exactly when the result does. The mantissas are combined in the same order,
-// and grouped the same way, as the plain arithmetic would combine the operands,
-// so each helper rounds where the plain expression rounds and no conversion pays
-// for the extra range. Mantissas that cancel — the same factor above and below —
-// cancel exactly, so a value divided by itself is exact, and [rescale] returns
-// the magnitude untouched when the two factors are the same.
+// Each has two paths. The fast one splits its operands with [math.Frexp] into a
+// mantissa in [0.5, 1) and a binary exponent, combines the mantissas — a bounded
+// handful of them, so their product can neither overflow nor underflow, and every
+// intermediate keeps its full 53 bits — sums the exponents as ints, and puts the
+// scale back with [math.Ldexp]. The mantissas are combined in the same order, and
+// grouped the same way, as the plain arithmetic would combine the operands, so
+// each helper rounds where the plain expression rounds and no conversion pays for
+// the extra range. Mantissas that cancel — the same factor above and below —
+// cancel exactly, so a value divided by itself is exact, and [rescale] returns the
+// magnitude untouched when the two factors are the same.
 //
-// The scale goes back on through [assembleMul] and [assembleDiv], never a bare
-// Ldexp of the fully combined mantissa: rounding the combined mantissa to 53
-// bits and then rounding again into the subnormal range is a double rounding,
-// and it is worse than the plain expression exactly where the plain expression
-// still works — [Scalar](1.25) divided by [Centimeters](1e307) is 1.25e-308, not
-// a bit less. The assemblers put the two sides back at their own scales, so the
-// last operation rounds once, into whatever range the result lands in.
+// That path is trustworthy only in the middle of the float64 range, and [atTheEnds]
+// is where it stops being so. Every mantissa it combines is rounded to 53 bits, and
+// a rounded mantissa cannot report what happened at a boundary it was never near:
+// the exponent is still carried separately, so a product whose true value is past
+// the last float64 comes back as a finite MaxFloat64, and a quotient whose mantissa
+// rounds up over the boundary comes back as an infinity though its true value is
+// representable. The same rounding at the other end lands in the subnormals, where
+// [math.Ldexp] rounds it a second time — a double rounding, worse than the plain
+// expression, which rounds once.
 //
-// An infinity or a NaN operand survives Frexp unchanged and propagates as it
-// would have through the plain arithmetic, so Inf × 0 is still a NaN.
+// So at either end the arithmetic is redone in exact rationals and rounded once, by
+// [exact]. A float64 magnitude and a float64 factor are exact rationals, so their
+// products and quotients are the true quantity, whatever its size; rounding that
+// rational to float64 once gives the correctly rounded result — an infinity exactly
+// when the true result overflows, the nearest float64 when it does not, and the
+// nearest subnormal at the bottom. It is never further from the true result than the
+// plain expression, because no float64 is. The ends are where results are rare and
+// boundaries are decided, so the cost is paid nowhere it is felt.
+//
+// An infinity or a NaN operand has no exact rational, and takes the fast path
+// whatever it lands on: it survives Frexp unchanged and propagates as it would have
+// through the plain arithmetic, so Inf × 0 is still a NaN.
 
-// smallestNormal is the smallest positive normal float64, 2⁻¹⁰²². Below it a
-// float64 has fewer than 53 bits of significand, so a value that lands there has
-// been rounded a second time.
-const smallestNormal = 2.2250738585072014e-308
+// nearTheEnds is the binary exponent past which the fast path is not trusted.
+// float64 runs out at 2¹⁰²⁴ and its normals at 2⁻¹⁰²², so ±1000 leaves twenty-odd
+// binades of margin at each end.
+const nearTheEnds = 1000
 
-// roundedTwice reports whether p — a result formed as Ldexp(mantissa, e), where
-// the mantissa was already rounded to 53 bits — has been rounded again. That is
-// so exactly when it lands in the subnormal range, zero included: the true
-// result may be a nonzero subnormal that a first rounding pushed onto the wrong
-// side of a tie, or off the bottom of the range entirely.
-func roundedTwice(p float64) bool {
-	return math.Abs(p) < smallestNormal // false for an infinity and for a NaN
+// atTheEnds reports whether a result assembled at binary exponent e is close enough
+// to an end of the float64 range that the mantissa roundings on the way to it could
+// have decided the wrong side of a boundary.
+//
+// It reads the exponent rather than the assembled result, so it is settled before
+// any rounding happens and cannot itself be fooled by one. Every mantissa a helper
+// combines is in [0.5, 1), so the mantissa it assembles is within four powers of two
+// of 1 either way, and the true result is between 2ᵉ⁻⁴ and 2ᵉ⁺². Every boundary is
+// therefore inside the window — an overflow needs e ≥ 1022, a subnormal e ≤ −1018 —
+// and no ordinary result is.
+func atTheEnds(e int) bool { return e >= nearTheEnds || e <= -nearTheEnds }
+
+// exact rounds the true rational value of an operation to float64, once: an
+// infinity exactly when it overflows the range, and the nearest float64 — subnormals
+// included — when it does not.
+//
+// A rational carries no signed zero, so a result that underflows takes its sign from
+// neg: the sign the plain expression would have given it.
+func exact(r *big.Rat, neg bool) float64 {
+	f, _ := r.Float64()
+	if f == 0 && neg {
+		return math.Copysign(0, -1)
+	}
+	return f
 }
 
-// assembleMul returns x × y × 2ᵉ, with x and y mantissa-scale (in [0.25, 1] in
-// magnitude, or zero) and each already carrying its full significand.
-//
-// The straight Ldexp of x × y is exact whenever the result is normal: the
-// product rounds once, and scaling by a power of two is then lossless. A
-// subnormal result is where that stops being true — Ldexp would round the
-// already-rounded product a second time — so the scale goes back onto the two
-// sides instead, splitting the exponent between them, and the multiplication
-// that follows rounds once, straight into the range the result belongs in.
-func assembleMul(x, y float64, e int) float64 {
-	p := math.Ldexp(x*y, e)
-	if !roundedTwice(p) || x == 0 || y == 0 {
-		return p
-	}
-	// Half the exponent on each side. A mantissa is within two powers of two of
-	// 1 and a subnormal result puts e near −1022, so both halves stay well inside
-	// the normal range, both Ldexps are exact, and the product is correctly
-	// rounded. An e low enough to push a half out of that range is one whose true
-	// result is orders of magnitude below the smallest subnormal, and it is zero
-	// whichever way it is assembled.
-	h := e / 2
-	return math.Ldexp(x, h) * math.Ldexp(y, e-h)
+// baseRat returns m × factor exactly: the base magnitude as a rational, which —
+// unlike the float64 [Value.Base] — cannot overflow or underflow.
+func baseRat(m, factor float64) *big.Rat {
+	return new(big.Rat).Mul(new(big.Rat).SetFloat64(m), new(big.Rat).SetFloat64(factor))
 }
 
-// assembleDiv returns x ÷ y × 2ᵉ, under the same rule as [assembleMul]: exact
-// while the quotient is normal, and split across numerator and denominator where
-// it is subnormal — the numerator scaled down by half the exponent and the
-// denominator up by the other half — so that the division rounds once rather
-// than twice.
-func assembleDiv(x, y float64, e int) float64 {
-	q := math.Ldexp(x/y, e)
-	if !roundedTwice(q) || x == 0 || y == 0 {
-		return q
+// exactly reports whether the operands have an exact rational rendering, which
+// every float64 but an infinity and a NaN has.
+func exactly(xs ...float64) bool {
+	for _, x := range xs {
+		if !isFinite(x) {
+			return false
+		}
 	}
-	h := e / 2
-	return math.Ldexp(x, h) / math.Ldexp(y, h-e)
+	return true
 }
 
 // rescale returns m × (from / to): a magnitude carried in a unit of factor from,
 // expressed in a unit of factor to. from == to returns m exactly, so a value is
 // always expressible in the unit it already carries.
 //
-// The mantissas are combined in the same order as the plain m × from ÷ to, so
-// the rounding is the plain expression's — the exponent split costs no accuracy,
-// it only keeps the intermediate in range.
+// The mantissas are combined in the same order as the plain m × from ÷ to, so the
+// rounding is the plain expression's — the exponent split costs no accuracy, it only
+// keeps the intermediate in range — and at the ends of the range the true value is
+// rounded once instead.
 func rescale(m, from, to float64) float64 {
 	if from == to {
 		return m
@@ -324,27 +341,43 @@ func rescale(m, from, to float64) float64 {
 	fm, em := math.Frexp(m)
 	ffrom, efrom := math.Frexp(from)
 	fto, eto := math.Frexp(to)
-	return assembleDiv(fm*ffrom, fto, em+efrom-eto)
+	e := em + efrom - eto
+	if !atTheEnds(e) || !exactly(m, from, to) || to == 0 {
+		return math.Ldexp(fm*ffrom/fto, e)
+	}
+	return exact(new(big.Rat).Quo(baseRat(m, from), new(big.Rat).SetFloat64(to)), math.Signbit(m))
 }
 
 // product returns (a × af) × (b × bf): two magnitudes multiplied in base units.
-// The mantissas are grouped as the plain expression groups them, so the rounding
-// is the plain expression's.
+// The mantissas are grouped as the plain expression groups them, so the rounding is
+// the plain expression's; at the ends of the range the true product is rounded once
+// instead, so it overflows exactly when the true product does.
 func product(a, af, b, bf float64) float64 {
 	fa, ea := math.Frexp(a)
 	faf, eaf := math.Frexp(af)
 	fb, eb := math.Frexp(b)
 	fbf, ebf := math.Frexp(bf)
-	return assembleMul(fa*faf, fb*fbf, ea+eaf+eb+ebf)
+	e := ea + eaf + eb + ebf
+	if !atTheEnds(e) || !exactly(a, af, b, bf) {
+		return math.Ldexp((fa*faf)*(fb*fbf), e)
+	}
+	return exact(new(big.Rat).Mul(baseRat(a, af), baseRat(b, bf)), math.Signbit(a) != math.Signbit(b))
 }
 
-// quotient returns (a × af) ÷ (b × bf): two magnitudes divided in base units.
+// quotient returns (a × af) ÷ (b × bf): two magnitudes divided in base units, under
+// the same rule as [product] — and a zero divisor, which [Value.Div] refuses before
+// it gets here, keeps the fast path, where it is an infinity or a NaN as it would be
+// in the plain expression.
 func quotient(a, af, b, bf float64) float64 {
 	fa, ea := math.Frexp(a)
 	faf, eaf := math.Frexp(af)
 	fb, eb := math.Frexp(b)
 	fbf, ebf := math.Frexp(bf)
-	return assembleDiv(fa*faf, fb*fbf, ea+eaf-eb-ebf)
+	e := ea + eaf - eb - ebf
+	if !atTheEnds(e) || !exactly(a, af, b, bf) || b == 0 || bf == 0 {
+		return math.Ldexp((fa*faf)/(fb*fbf), e)
+	}
+	return exact(new(big.Rat).Quo(baseRat(a, af), baseRat(b, bf)), math.Signbit(a) != math.Signbit(b))
 }
 
 // Scale returns v multiplied by a dimensionless factor. It reports no error, so

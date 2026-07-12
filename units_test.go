@@ -983,12 +983,26 @@ func TestBaseMagnitudeIsNeverAnIntermediate(t *testing.T) {
 // and a float64 factor are both exact rationals, so their product is the true
 // quantity a Value denotes — whether or not float64 can hold it.
 var (
-	maxFloat   = new(big.Rat).SetFloat64(math.MaxFloat64)
-	halfMax    = new(big.Rat).Quo(maxFloat, big.NewRat(2, 1))
-	twiceMax   = new(big.Rat).Mul(maxFloat, big.NewRat(2, 1))
 	relTol     = big.NewRat(1, 1e9)
 	subnormalF = new(big.Rat).SetFloat64(1e-310)
 )
+
+// nearest returns the correctly rounded float64 rendering of the true result:
+// the nearest float64 to it, or an infinity when no float64 is near enough —
+// which is to say exactly when the true result overflows the range.
+//
+// It is what makes the overflow boundary decidable rather than a matter of
+// opinion: there is no band around MaxFloat64 in which either answer will do.
+// [big.Rat] holds the true result exactly, whatever its size, and Float64 rounds
+// it to nearest-even once, the way an operation on the true result would have to.
+func nearest(want *big.Rat) float64 {
+	f, _ := want.Float64()
+	return f
+}
+
+// overflows reports whether the true result is past the last float64 — the last
+// float64 itself, MaxFloat64, is not.
+func overflows(want *big.Rat) bool { return math.IsInf(nearest(want), 0) }
 
 // baseRat returns v's base magnitude exactly.
 func baseRat(t *testing.T, v units.Value) *big.Rat {
@@ -1081,24 +1095,20 @@ func requireClose(t *testing.T, got float64, want *big.Rat) {
 }
 
 // requireResult asserts the contract of an operation that can report an error:
-// the true result whenever float64 can hold it, and ErrNotFinite only when it
-// genuinely cannot. Within a factor of two of MaxFloat64 the rounding decides,
-// so either answer is honest there.
+// the true result whenever float64 can hold it, and ErrNotFinite exactly when it
+// cannot. The boundary is decided by [nearest], not conceded to the rounding: a
+// finite number handed back for a true result that overflows is the whole of the
+// bug this guards, and it lives at MaxFloat64 itself.
 func requireResult(t *testing.T, got float64, err error, want *big.Rat) {
 	t.Helper()
 
-	abs := new(big.Rat).Abs(want)
-	switch {
-	case abs.Cmp(halfMax) <= 0:
-		require.NoError(t, err, "the true result %s is representable", want.FloatString(3))
-		requireClose(t, got, want)
-	case abs.Cmp(twiceMax) >= 0:
-		require.ErrorIs(t, err, units.ErrNotFinite, "the true result %s overflows float64", want.FloatString(3))
-	case err != nil:
-		require.ErrorIs(t, err, units.ErrNotFinite)
-	default:
-		requireClose(t, got, want)
+	if overflows(want) {
+		require.ErrorIs(t, err, units.ErrNotFinite,
+			"the true result %s overflows float64, so it is not a finite %v", want.FloatString(3), got)
+		return
 	}
+	require.NoError(t, err, "the true result %s is representable", want.FloatString(3))
+	requireClose(t, got, want)
 }
 
 // requireFloat asserts the same contract for an operation with no error to
@@ -1107,17 +1117,13 @@ func requireResult(t *testing.T, got float64, err error, want *big.Rat) {
 func requireFloat(t *testing.T, got float64, want *big.Rat) {
 	t.Helper()
 
-	abs := new(big.Rat).Abs(want)
-	switch {
-	case abs.Cmp(halfMax) <= 0:
-		requireClose(t, got, want)
-	case abs.Cmp(twiceMax) >= 0:
+	if overflows(want) {
 		require.True(t, math.IsInf(got, want.Sign()),
 			"the true result %s overflows float64, so it comes back as an infinity: got %v",
 			want.FloatString(3), got)
-	case !math.IsInf(got, 0):
-		requireClose(t, got, want)
+		return
 	}
+	requireClose(t, got, want)
 }
 
 // extremes is the sweep matrix: every value in it is ordinary — a finite
@@ -1682,8 +1688,10 @@ func TestArithmeticAtTheExtremesIsNoWorseThanNaive(t *testing.T) {
 							new(big.Rat).Mul(ratOf(t, mb), ratOf(t, ub.Factor())))
 
 						p, err := a.Mul(b)
-						if new(big.Rat).Abs(want).Cmp(halfMax) > 0 {
-							continue // the true product is out of range; ErrNotFinite is its own test
+						if overflows(want) {
+							require.ErrorIs(t, err, units.ErrNotFinite,
+								"%s x %s: the true product %s overflows float64", a, b, want.FloatString(3))
+							continue
 						}
 						require.NoError(t, err, "the true product %s is representable", want.FloatString(3))
 
@@ -1706,8 +1714,10 @@ func TestArithmeticAtTheExtremesIsNoWorseThanNaive(t *testing.T) {
 							new(big.Rat).Mul(ratOf(t, mb), ratOf(t, ub.Factor())))
 
 						q, err := a.Div(b)
-						if new(big.Rat).Abs(want).Cmp(halfMax) > 0 {
-							continue // the true quotient is out of range
+						if overflows(want) {
+							require.ErrorIs(t, err, units.ErrNotFinite,
+								"%s / %s: the true quotient %s overflows float64", a, b, want.FloatString(3))
+							continue
 						}
 						require.NoError(t, err, "the true quotient %s is representable", want.FloatString(3))
 
@@ -1733,8 +1743,12 @@ func TestArithmeticAtTheExtremesIsNoWorseThanNaive(t *testing.T) {
 						ratOf(t, to.Factor()))
 
 					got, err := v.In(to)
-					if new(big.Rat).Abs(want).Cmp(halfMax) > 0 {
-						continue // the true magnitude is out of range in the target unit
+					if overflows(want) {
+						require.ErrorIs(t, err, units.ErrNotFinite,
+							"%s in %s: the true magnitude %s overflows float64", v, to, want.FloatString(3))
+						_, cerr := v.Convert(to)
+						require.ErrorIs(t, cerr, units.ErrNotFinite, "Convert fails exactly where In does")
+						continue
 					}
 					require.NoError(t, err, "the true magnitude %s is representable", want.FloatString(3))
 
@@ -1744,6 +1758,169 @@ func TestArithmeticAtTheExtremesIsNoWorseThanNaive(t *testing.T) {
 					c, err := v.Convert(to)
 					require.NoError(t, err)
 					require.Equal(t, got, c.Mag(), "Convert agrees with In: %s in %s", v, to)
+				}
+			}
+		}
+	})
+}
+
+// boundaryMags are the magnitudes the overflow boundary is swept at: the last
+// float64 and the two below it, the top of the range, the smallest normal and the
+// smallest subnormal, and — the sharp ones — the factors either side of 1 that
+// decide, when multiplied into a magnitude already at the top of the range, whether
+// the true result stays representable or crosses the last float64. Every one of them
+// is swept at both signs.
+func boundaryMags() []float64 {
+	last := math.MaxFloat64
+	return []float64{
+		last,
+		math.Nextafter(last, 0),
+		math.Nextafter(math.Nextafter(last, 0), 0),
+		8.98846567431158e307, // 2¹⁰²³, where the last binade begins
+		1e308,
+		1.0000000000000002, // 1 + 2⁻⁵²: enough to carry MaxFloat64 over the end
+		1.0000000000000004, // 1 + 2⁻⁵¹
+		0.9999999999999999, // 1 − 2⁻⁵³: enough to bring an infinity back
+		1, 2, 0.5,
+		1e300, 1e-300, // the Defined factors, met head on
+		2.2250738585072014e-308, // the smallest normal
+		1e-323, 5e-324,          // and the subnormals: the other end must not regress
+	}
+}
+
+// boundaryUnits pair an ordinary unit set with Defined factors of 1e±300, which are
+// what carry an everyday magnitude to the ends of the range and back.
+func boundaryUnits() []units.Unit {
+	return []units.Unit{units.One, units.Millimeter, units.Meter, units.Gram, hugeLength, tinyLength}
+}
+
+// atTheEnds reports whether the true result lies in the last binade of float64 or
+// below the smallest normal: the two regions where a single rounding decides between
+// the last float64 and an infinity, or between one subnormal and the next, and so
+// where the arithmetic must be correctly rounded rather than merely close.
+func atTheEnds(w float64) bool {
+	a := math.Abs(w)
+	return a >= 8.98846567431158e307 || a < 2*2.2250738585072014e-308
+}
+
+// requireExactBoundaryf asserts the whole finiteness contract at one point: the true
+// result is past the last float64 and the operation says so, or it is representable
+// and the operation hands it back — correctly rounded at the ends of the range, and
+// no further out than the plain expression anywhere else. There is no third case,
+// and in particular no band around MaxFloat64 in which a finite answer to an
+// infinite question will do.
+func requireExactBoundaryf(t *testing.T, got, naive float64, err error, want *big.Rat, format string, args ...any) {
+	t.Helper()
+
+	label := fmt.Sprintf(format, args...)
+	if overflows(want) {
+		require.ErrorIs(t, err, units.ErrNotFinite,
+			"%s: the true result %s is past the last float64, so it is not the finite %v",
+			label, want.FloatString(3), got)
+		return
+	}
+	require.NoError(t, err, "%s: the true result %s is representable", label, want.FloatString(3))
+
+	if w := nearest(want); atTheEnds(w) {
+		require.Equal(t, w, got, "%s: the true result %s rounds to %v", label, want.FloatString(3), w)
+		return
+	}
+	requireNoWorseThanNaivef(t, got, naive, want, "%s", label)
+}
+
+// TestOverflowBoundaryIsDecided sweeps the top of the float64 range, where the
+// difference between the last float64 and an infinity is one rounding. An exact
+// rational decides each case, so every point in the sweep has one right answer:
+// ErrNotFinite when the true result is past the last float64, and the correctly
+// rounded value when it is not.
+func TestOverflowBoundaryIsDecided(t *testing.T) {
+	t.Run("the reproducer", func(t *testing.T) {
+		// MaxFloat64 × (1e-300 × 1e300): the two factors multiply to a shade over 1,
+		// which is all it takes to carry the last float64 past the end of the range.
+		// The product is an infinity, and no finite magnitude may be handed back for it.
+		huge := units.Define("boundary_huge_len", units.Length, 1e300)
+		v, err := units.Scalar(1e-300).Mul(units.New(math.MaxFloat64, huge))
+		require.ErrorIs(t, err, units.ErrNotFinite, "the true product is past the last float64")
+		require.Equal(t, units.Value{}, v, "no value escapes with the error")
+
+		// …and the mirror on the other side: a quotient whose true value is the last
+		// float64 must come back, not be refused as an overflow because a mantissa
+		// rounded up over the boundary on the way.
+		q, err := units.Grams(math.Nextafter(math.MaxFloat64, 0)).Div(units.Grams(0.9999999999999999))
+		require.NoError(t, err, "the true quotient is representable, so it is not an overflow")
+		require.Equal(t, math.MaxFloat64, q.Mag(), "…and it is the last float64")
+	})
+
+	signs := []float64{1, -1}
+
+	t.Run("Mul", func(t *testing.T) {
+		for _, ua := range boundaryUnits() {
+			for _, ub := range boundaryUnits() {
+				for _, ma := range boundaryMags() {
+					for _, mb := range boundaryMags() {
+						for _, sa := range signs {
+							for _, sb := range signs {
+								a := units.New(sa*ma, ua)
+								b := units.New(sb*mb, ub)
+								want := new(big.Rat).Mul(baseRat(t, a), baseRat(t, b))
+								naive := (a.Mag() * ua.Factor()) * (b.Mag() * ub.Factor())
+
+								p, err := a.Mul(b)
+								requireExactBoundaryf(t, p.Mag(), naive, err, want, "%s x %s", a, b)
+							}
+						}
+					}
+				}
+			}
+		}
+	})
+
+	t.Run("Div", func(t *testing.T) {
+		for _, ua := range boundaryUnits() {
+			for _, ub := range boundaryUnits() {
+				for _, ma := range boundaryMags() {
+					for _, mb := range boundaryMags() {
+						for _, sa := range signs {
+							for _, sb := range signs {
+								a := units.New(sa*ma, ua)
+								b := units.New(sb*mb, ub)
+								want := new(big.Rat).Quo(baseRat(t, a), baseRat(t, b))
+								naive := (a.Mag() * ua.Factor()) / (b.Mag() * ub.Factor())
+
+								q, err := a.Div(b)
+								requireExactBoundaryf(t, q.Mag(), naive, err, want, "%s / %s", a, b)
+							}
+						}
+					}
+				}
+			}
+		}
+	})
+
+	t.Run("In and Convert", func(t *testing.T) {
+		for _, from := range boundaryUnits() {
+			for _, to := range boundaryUnits() {
+				if from.Kind() != to.Kind() {
+					continue
+				}
+
+				for _, m := range boundaryMags() {
+					for _, s := range signs {
+						v := units.New(s*m, from)
+						want := new(big.Rat).Quo(baseRat(t, v), ratOf(t, to.Factor()))
+						naive := v.Mag() * from.Factor() / to.Factor()
+
+						got, err := v.In(to)
+						requireExactBoundaryf(t, got, naive, err, want, "%s in %s", v, to)
+
+						c, cerr := v.Convert(to)
+						if err != nil {
+							require.ErrorIs(t, cerr, units.ErrNotFinite, "Convert fails exactly where In does")
+							continue
+						}
+						require.NoError(t, cerr)
+						require.Equal(t, got, c.Mag(), "Convert agrees with In")
+					}
 				}
 			}
 		}

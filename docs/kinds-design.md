@@ -179,9 +179,8 @@ through the three helpers in `value.go` — `rescale`, `product`, `quotient` —
 split their operands with `math.Frexp`, combine the mantissas (a bounded handful,
 so their product can neither overflow nor underflow, and every intermediate keeps
 its full 53 bits), sum the binary exponents as `int`s, and put the scale back with
-`math.Ldexp`. Only that last step can leave the float64 range, and it does so
-exactly when the result does. A new operation gets this by using the helpers;
-reaching for `Base()` instead is how the bug comes back.
+`math.Ldexp`. A new operation gets this by using the helpers; reaching for `Base()`
+instead is how the bug comes back.
 
 **The range is free.** The exponent split is *all* the helpers do: the mantissas
 are combined in the same order, and grouped the same way, as the plain
@@ -193,37 +192,57 @@ an ulp for the extra range. `25.4 mm` is exactly `1 in`, and `1000 g/cm³` exact
 magnitude untouched when the two factors are the same, so a conversion into a
 value's own unit is the identity.
 
-**And it adds no rounding of its own — the subnormals included.** Putting the
-scale back with a bare `Ldexp` of the fully combined mantissa would round twice:
-once to 53 bits, and once more when `Ldexp` lands in the subnormal range, where a
-float64 has fewer bits to land on. Double-rounded, the helper is *worse* than the
-plain expression it replaced, precisely where the plain expression still works and
-rounds once:
+**But a rounded mantissa cannot decide a boundary, so at the ends of the range the
+helpers do not ask it to.** Every mantissa the split path combines is rounded to 53
+bits while its exponent is still carried separately, and that is exactly the
+information a boundary needs:
+
+- **The top.** A mantissa rounded with exponent room to spare cannot overflow, so it
+  cannot report an overflow. `Ldexp` then scales it to a finite `MaxFloat64`, and a
+  product whose true value is *past* the last float64 comes back as a real quantity
+  with a nil error — the poisoned document the finiteness rule exists to prevent.
+  Its mirror: a quotient mantissa that rounds **up** over the boundary scales to an
+  `+Inf`, and `ErrNotFinite` is returned for a true value float64 holds perfectly
+  well.
+- **The bottom.** `Ldexp` lands the already-rounded mantissa in the subnormal range,
+  where a float64 has fewer bits to land on, and rounds it a **second** time. Double
+  rounded, the helper is *worse* than the plain expression it replaced, precisely
+  where the plain expression still works and rounds once.
+
+So where the assembled binary exponent runs past `±1000` (`atTheEnds`) — twenty-odd
+binades clear of every boundary, and nowhere an ordinary result lands — the helpers
+redo the arithmetic in **exact rationals** and round **once**. A float64 magnitude
+and a float64 factor are exact rationals, so `math/big` holds the true quantity
+whatever its size, and rounding it to float64 once is by definition the correctly
+rounded result: an infinity exactly when the true result is past the last float64,
+the nearest float64 when it is not, and the nearest *subnormal* at the bottom. No
+float64 is nearer, so it is never worse than the plain expression either.
 
 ```go
-units.Scalar(1.25).Div(units.Centimeters(1e307))  // 1.25e-308, not 1.2499999999999996e-308
-units.Meters(5e-324).Mul(units.Grams(-2.5))       // -1.5e-323, not -1e-323
+units.Scalar(1e-300).Mul(units.New(math.MaxFloat64, huge))  // ErrNotFinite — the true product is past the last float64
+units.Scalar(1.25).Div(units.Centimeters(1e307))            // 1.25e-308, not 1.2499999999999996e-308
+units.Meters(5e-324).Mul(units.Grams(-2.5))                 // -1.5e-323, not -1e-323
 ```
 
-So `assembleMul` and `assembleDiv` own that step. While the result is normal, the
-straight `Ldexp` is exact — the last operation rounds once and scaling by a power
-of two is lossless — and that is the path taken. Where the result is subnormal the
-exponent is split across the two sides instead, half each: both sides stay normal,
-so both `Ldexp`s are exact, and the multiplication or division that follows rounds
-**once**, straight into the range the result belongs in. That is the plain
-expression's own rounding wherever the plain expression is usable, and better than
-it wherever the plain expression's intermediates overflow or underflow (which is
-why the scaled path exists at all).
+An infinity or a `NaN` operand has no exact rational and keeps the fast path, where
+it propagates as it would through the plain arithmetic — `Inf × 0` is still a `NaN`,
+and still `ErrNotFinite`.
 
-The test suite pins all of this down against a `big.Rat` oracle, with a
-ulp-distance metric: every conversion, product and quotient — over everyday
-magnitudes, and over the extremes (subnormals, `1e307`, `MaxFloat64`, `Define`d
-factors of `1e±300`) — must land no further from the true result than the plain
-expression it replaced, and within two ulps of it. Two ulps and not half of one
-because `(a × af) × (b × bf)` rounds three times whoever computes it; what is
-gated is that the helpers round where the plain expression rounds, and no more
-often. A relative tolerance — even `1e-9` — is some `10⁷` ulps and would not see a
-regression of this class.
+The test suite pins all of this down against a `big.Rat` oracle. Accuracy: every
+conversion, product and quotient — over everyday magnitudes, and over the extremes
+(subnormals, `1e307`, `MaxFloat64`, `Define`d factors of `1e±300`) — must land no
+further from the true result than the plain expression it replaced, and within two
+ulps of it. Two ulps and not half of one because `(a × af) × (b × bf)` rounds three
+times whoever computes it; what is gated is that the helpers round where the plain
+expression rounds, and no more often. A relative tolerance — even `1e-9` — is some
+`10⁷` ulps and would not see a regression of this class.
+
+Finiteness the same oracle decides outright, and there is **no ambiguous band** to
+excuse a wrong answer near `MaxFloat64`: the exact rational either exceeds the last
+float64 or it does not. The overflow boundary is swept densely — both signs, the
+last three float64s, the factors either side of 1 that carry them over the end —
+and every point asserts `ErrNotFinite` when the true result overflows, and the
+correctly rounded value when it does not.
 
 `Value.Base()` stays as it is: it is an **accessor**, not an operation. A value
 whose base magnitude genuinely overflows reports `+Inf` there, honestly, and one
