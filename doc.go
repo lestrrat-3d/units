@@ -106,6 +106,33 @@
 // single carve-out is that [Value.Add] and [Value.Sub] accept an angle and a
 // dimensionless value together, because theta + pi/2 is an angle.
 //
+// # The text form
+//
+// A [Value] serializes as text: [Value.MarshalText] and [Value.UnmarshalText]
+// implement [encoding.TextMarshaler] and [encoding.TextUnmarshaler], so
+// encoding/json — and every other text-based encoder — carries a quantity as
+// "<magnitude> <symbol>":
+//
+//	type Step struct {
+//		Distance units.Value `json:"distance"`
+//	}
+//	b, _ := json.Marshal(Step{Distance: units.Millimeters(10)}) // {"distance":"10 mm"}
+//
+// The magnitude is the shortest float64 rendering and the symbol is the unit's
+// registered one, so the round trip is exact: an unmarshalled value is the
+// marshalled one, the same unit and the same magnitude bit for bit, subnormals
+// and MaxFloat64 included. A dimensionless value has no symbol to write ([One]'s
+// is empty) and is the bare number ("1.5"); nothing else parses as one, since a
+// trailing space, a doubled space or a token after the symbol is
+// [ErrMalformedText].
+//
+// The symbol is resolved with [Lookup], and an unregistered one is
+// [ErrUnknownUnit] — never a guess, never the kind's base unit, never a silently
+// dimensionless value. A value that cannot be read back is not written: an
+// unnamed kind is [ErrUnnamedKind], an overflowed one [ErrOverflowedKind], and a
+// magnitude that is not finite [ErrNotFinite], which is also what a literal
+// infinity, NaN or past-the-range magnitude in a document reads as.
+//
 // # Extending the unit set
 //
 // [Define] registers a new unit against a kind. A symbol may not be redefined,

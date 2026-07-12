@@ -86,6 +86,21 @@ top of it, and depends only on the standard library.
   arithmetic rounds where the plain expression rounds and never once more —
   subnormal results included, where a second rounding would be worse than the
   plain expression: `Scalar(1.25).Div(Centimeters(1e307))` is `1.25e-308`.
+- **A quantity serializes with its unit.** `Value` implements
+  `encoding.TextMarshaler`/`TextUnmarshaler`, so `encoding/json` — and any other
+  text-based encoder — writes it as `"<magnitude> <symbol>"`: `"10 mm"`,
+  `"7850 kg/m^3"`, `"90 deg"`. A dimensionless value is the bare number (`"1.5"`),
+  since `One`'s symbol is empty. The round trip is **exact** — the same unit, and
+  the same magnitude bit for bit — and the symbol is resolved through `Lookup`: an
+  unregistered symbol is an error, never a guess and never a silently dimensionless
+  value. What cannot be read back is not written: a value of an unnamed kind, of an
+  overflowed kind, or with a non-finite magnitude has **no text form** and is an
+  error rather than `{}` with a nil error.
+
+  ```go
+  type Step struct{ Distance units.Value `json:"distance"` }
+  b, err := json.Marshal(Step{Distance: units.Millimeters(10)})  // {"distance":"10 mm"}
+  ```
 - **The zero `Value` is 0 of `One`**, so a `Value` declared with `var` behaves as
   a plain 0 in every operation.
 - **Extensible.** `Define` registers a new unit against a kind; a symbol may not

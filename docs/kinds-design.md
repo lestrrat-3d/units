@@ -557,13 +557,78 @@ actually measures — length, area, volume, mass, density, moment of inertia,
 second moment of area — is named and has a registered base unit, so this bites
 only genuine intermediates such as `L⁻¹`.
 
-## 6. What this breaks
+## 6. The text form of a value
 
-Almost nothing, because of one lucky fact: **`Kind` is never serialized.** JSON
-stores the unit *symbol* (`"mm"`) and re-derives the kind through `Lookup`, so
-changing `Kind`'s underlying type from `int` to a struct changes **no wire
-format** and no persisted document. That is also why only a value of a *named*
-kind is persistable: a synthetic `[L^-1]` symbol has nothing to re-derive from.
+A `Value`'s fields are unexported, so a `Value` with no marshaller encodes to
+`{}` — the magnitude *and* the unit gone, with a **nil error**. A consumer that
+records every quantity in a serializable document would round-trip a recipe with
+all its dimensions deleted and nothing to say so. `Value` therefore implements
+`encoding.TextMarshaler` and `encoding.TextUnmarshaler`, which `encoding/json`
+and every other text-based encoder use automatically:
+
+```go
+type Step struct{ Distance units.Value `json:"distance"` }
+json.Marshal(Step{Distance: units.Millimeters(10)})  // {"distance":"10 mm"}
+```
+
+The form is **`<magnitude> <symbol>`**: the magnitude, one ASCII space, and the
+unit's registered symbol — `10 mm`, `2.5 mm^2`, `7850 kg/m^3`, `90 deg`. The
+symbol is the vocabulary the registry already has, so nothing new is invented at
+the document boundary. `One`'s symbol is **empty**, so a dimensionless value is
+the **bare number** (`1.5`, `0`) — and that is the only text with no symbol: a
+trailing space, a doubled space and a token after the symbol are each malformed,
+so a bare number can never be a text whose unit went missing.
+
+**The round trip is exact — bit for bit, not "close".** The magnitude is written
+with `strconv.FormatFloat(m, 'g', -1, 64)`, the shortest text that reads back as
+the *same* float64, and read with `strconv.ParseFloat`; the symbol is resolved
+with `Lookup`, which returns the very unit that wrote it. `Unmarshal(Marshal(v))`
+is `v`: the same unit, and the same `math.Float64bits`, subnormals and
+`MaxFloat64` included. It cannot be otherwise. This library holds that `25.4 mm`
+is *exactly* `1 in`; a text form that lost a bit would give that up at the one
+boundary where the quantity leaves the process.
+
+**A symbol this package emits is a symbol it can read — the check is `Lookup`
+itself.** Three values have no text form, and each is an **error** rather than a
+symbol nothing can resolve:
+
+| The value | The error | Why |
+|---|---|---|
+| an **unnamed** kind (`[L^-1]`) | `ErrUnnamedKind` | the synthetic symbol is unregistered; the value is a transient intermediate. Compose it back into a named kind. |
+| an **overflowed** kind (`[overflow]`) | `ErrOverflowedKind` | its exponents are clamped stand-ins; a programming error must not be laundered into a document. |
+| a **non-finite** magnitude | `ErrNotFinite` | `New`/`FromBase`/`Scale`/`Neg` can build one, and it is not a quantity: a persisted `+Inf mm` read back is a length that is not a length. |
+
+Reading is as strict:
+
+- An unregistered symbol is `ErrUnknownUnit`. It is **never** guessed at, never
+  resolved to the kind's base unit, and never quietly made dimensionless — a
+  magnitude whose unit is unknown is not a quantity either.
+- Text that is not `<magnitude> <symbol>` is `ErrMalformedText`: an empty text, a
+  magnitude `ParseFloat` rejects, an empty symbol after the space, a further token.
+- A literal `+Inf`/`NaN` — which `ParseFloat` accepts — and a literal past the last
+  float64 (`1e999`) are `ErrNotFinite`. A literal *below* the smallest subnormal
+  (`1e-999`) is the nearest float64, `+0`: the same rounding the arithmetic makes at
+  that end of the range, and the whole of what a float64 holds of such a number.
+  `MarshalText` never writes one.
+
+**The negative-zero rule holds across the boundary.** A `Value` carries no `-0`,
+so a zero marshals as `"0"` and never as `"-0 mm"`; and any zero in a document,
+a literal `-0` included, reads back as `+0` — `New` canonicalises it, as it does
+every zero from outside.
+
+`UnmarshalText` is the one pointer method on `Value`; `encoding.TextUnmarshaler`
+requires it. It **assigns** the whole value rather than mutating a field, so the
+immutability rule is untouched: a `Value` that is read into is replaced, not
+edited.
+
+## 7. What this breaks
+
+Almost nothing, because of one lucky fact: **`Kind` is never serialized.** The
+text form stores the unit *symbol* (`"mm"`) and re-derives the kind through
+`Lookup`, so changing `Kind`'s underlying type from `int` to a struct changes
+**no wire format** and no persisted document. That is also why only a value of a
+*named* kind is persistable: a synthetic `[L^-1]` symbol has nothing to re-derive
+from.
 
 The compile-time breakage is small and mechanical:
 
@@ -577,10 +642,11 @@ The compile-time breakage is small and mechanical:
 `sketch` is pre-1.0 with no tags, and its only consumer is `decad`, which has no
 code yet. This is the cheapest this migration will ever be.
 
-## 7. Non-goals
+## 8. Non-goals
 
 Time, current, temperature and the rest of SI — this is a geometry library.
 Unit *parsing* from arbitrary strings (`Lookup` by symbol is for deserialization,
-not a expression parser; `sketch/param` owns expressions). Automatic unit
-*selection* for display (that is `System`'s job). Compound symbol synthesis for
-unnamed kinds beyond a readable `L²·M` form.
+not a expression parser; `sketch/param` owns expressions; `UnmarshalText` reads the
+one text form this library writes, and nothing else). Automatic unit *selection*
+for display (that is `System`'s job). Compound symbol synthesis for unnamed kinds
+beyond a readable `L²·M` form.

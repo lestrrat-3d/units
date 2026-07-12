@@ -6,6 +6,7 @@ import (
 	"math"
 	"math/big"
 	"strconv"
+	"strings"
 )
 
 // ErrIncompatible is returned when an operation mixes units of different kinds
@@ -24,6 +25,10 @@ var ErrDivideByZero = errors.New("units: division by zero")
 // infinity and never a NaN, because a non-finite magnitude carries a registered
 // symbol and so would persist as if it were a real quantity.
 //
+// It is what [Value.MarshalText] and [Value.UnmarshalText] refuse, for the same
+// reason: a non-finite magnitude is not a quantity, and a persisted "+Inf mm" read
+// back is a length that is not a length.
+//
 // It is the result that must be representable, never an intermediate: an operand
 // whose own base magnitude overflows — [Meters](1e307), whose [Value.Base] is
 // +Inf — is an ordinary operand, and an operation on it whose result is in range
@@ -39,6 +44,35 @@ var ErrDivideByZero = errors.New("units: division by zero")
 // and [Value.Neg] — do not check: a caller that hands them an infinity, or that
 // scales a value up past the float64 range, gets a non-finite Value back.
 var ErrNotFinite = errors.New("units: result is not finite")
+
+// ErrUnnamedKind is returned by [Value.MarshalText] for a value of an unnamed kind.
+// Such a value carries a synthetic, unregistered unit whose symbol is bracketed
+// ("[L^-1]"), and [Lookup] resolves nothing in that namespace: a text form carrying
+// it could never be read back, so it is refused rather than written. A value of an
+// unnamed kind is a transient intermediate — compose it back into a named kind, every
+// one of which has a registered base unit, before persisting it.
+var ErrUnnamedKind = errors.New("units: a value of an unnamed kind has no text form")
+
+// ErrOverflowedKind is returned by [Value.MarshalText] for a value whose kind has
+// overflowed ([Kind.Overflowed]). Its exponents are clamped stand-ins, it has no base
+// unit, and it carries the reserved synthetic symbol "[overflow]" — which, like every
+// bracketed symbol, resolves to nothing. It is a programming error made visible, and
+// it must not be laundered into a document.
+var ErrOverflowedKind = errors.New("units: a value of an overflowed kind has no text form")
+
+// ErrMalformedText is returned by [Value.UnmarshalText] for text that is not
+// "<magnitude> <symbol>": an empty text, a magnitude that is not a float64 (bad
+// syntax, or a literal out of the float64 range), a missing or empty symbol after the
+// separating space, or a further token after the symbol. The wrapped [strconv] error
+// is included where there is one.
+var ErrMalformedText = errors.New("units: malformed value text")
+
+// ErrUnknownUnit is returned by [Value.UnmarshalText] when the text's symbol is not
+// registered — an application unit whose [Define] has not run, a typo, or a bracketed
+// symbol from the library's reserved namespace. An unresolvable symbol is an error: a
+// magnitude whose unit is unknown is never guessed at, never given a base unit, and
+// never quietly made dimensionless.
+var ErrUnknownUnit = errors.New("units: unknown unit symbol")
 
 // Value is a magnitude paired with the [Unit] it is expressed in. The zero
 // Value is 0 of the dimensionless unit [One]: the zero [Unit] is read as One, so
@@ -61,6 +95,34 @@ var ErrNotFinite = errors.New("units: result is not finite")
 // carry no signed zero at all). Which of those paths runs is an implementation
 // detail; it must never be visible in the result. A −0 would also print as "-0"
 // and flip the sign a caller reads off [math.Signbit].
+//
+// # The text form
+//
+// A Value's fields are unexported, so a Value with no marshaller would encode to an
+// empty object: the number and its unit both lost, silently, with a nil error.
+// [Value.MarshalText] and [Value.UnmarshalText] are the text form that carries both,
+// and encoding/json — and every other text-based encoder — uses them for a Value
+// wherever it appears, a struct field and a map key alike.
+//
+// The form is "<magnitude> <symbol>": the shortest float64 rendering, one ASCII space,
+// and the unit's registered symbol — "10 mm", "2.5 mm^2", "7850 kg/m^3", "90 deg". A
+// dimensionless value has no symbol to write ([One]'s is the empty string) and is the
+// bare number: "1.5", "0". Nothing else is a value: a trailing space, a doubled space
+// and a token after the symbol are each [ErrMalformedText], so the bare-number form is
+// the one text with no symbol and cannot be confused with a symbol that went missing.
+//
+// The round trip is exact. The magnitude is written with strconv.FormatFloat(m, 'g',
+// -1, 64) — the shortest text that reads back as the same float64 — and read with
+// [strconv.ParseFloat]; the symbol is resolved with [Lookup], which hands back the very
+// unit that wrote it. An unmarshalled value is therefore the marshalled one: the same
+// unit, and the same magnitude bit for bit, subnormals and MaxFloat64 included. It has
+// to be. The library holds that 25.4 mm is exactly 1 in, and a text form that lost a
+// bit would give that up at the document boundary.
+//
+// Three values have no text form, and each is an error rather than a symbol that could
+// never be read back: one of an unnamed kind ([ErrUnnamedKind]), one whose kind has
+// overflowed ([ErrOverflowedKind]), and one whose magnitude is not finite
+// ([ErrNotFinite]).
 type Value struct {
 	mag  float64
 	unit Unit
@@ -616,4 +678,109 @@ func (v Value) String() string {
 		return n
 	}
 	return n + " " + v.Unit().symbol
+}
+
+// MarshalText implements [encoding.TextMarshaler], rendering the value as
+// "<magnitude> <symbol>" — or, for a dimensionless value, as the bare magnitude. See
+// [Value.UnmarshalText], which reads exactly what this writes, and the text form
+// described on [Value].
+//
+// It reports an error rather than write a text that cannot be read back:
+//
+//   - [ErrOverflowedKind], for a value whose kind has overflowed ([Kind.Overflowed]):
+//     its symbol is the reserved "[overflow]", which resolves to nothing.
+//   - [ErrUnnamedKind], for a value of an unnamed kind: its synthetic symbol ("[L^-1]")
+//     is not in the registry either. The check is [Lookup] itself — a symbol this
+//     package emits is one it can read.
+//   - [ErrNotFinite], for a magnitude that is an infinity or a NaN. [New], [FromBase],
+//     [Value.Scale] and [Value.Neg] have no error to report and so can build one; it is
+//     not a quantity, and a persisted "+Inf mm" read back would be a length that is not
+//     a length. The arithmetic that can refuse already refuses it, and so does this.
+//
+// A zero is written as "0". A Value carries no negative zero, so there is no "-0 mm".
+func (v Value) MarshalText() ([]byte, error) {
+	u := v.Unit()
+	if u.kind.Overflowed() {
+		return nil, fmt.Errorf("%w: %s carries the reserved symbol %q", ErrOverflowedKind, v, u.symbol)
+	}
+	if r, ok := Lookup(u.symbol); !ok || r != u {
+		return nil, fmt.Errorf("%w: a %s carries the unregistered symbol %q", ErrUnnamedKind, u.kind, u.symbol)
+	}
+	if !isFinite(v.mag) {
+		return nil, fmt.Errorf("%w: cannot marshal %s", ErrNotFinite, v)
+	}
+
+	m := strconv.FormatFloat(v.mag, 'g', -1, 64)
+	if u.symbol == "" {
+		return []byte(m), nil
+	}
+	return []byte(m + " " + u.symbol), nil
+}
+
+// UnmarshalText implements [encoding.TextUnmarshaler], reading the text form
+// [Value.MarshalText] writes: a magnitude, one ASCII space, and a registered unit
+// symbol — or a bare magnitude, which is the dimensionless [One], whose symbol is
+// empty.
+//
+// The value is replaced whole, so unmarshalling into a Value that already holds a
+// quantity leaves nothing of it. [Value] is immutable everywhere else; this is the
+// pointer method [encoding.TextUnmarshaler] requires, and it assigns rather than
+// mutates.
+//
+// It reports an error rather than guess:
+//
+//   - [ErrMalformedText], for text that is not "<magnitude> <symbol>": an empty text,
+//     a magnitude [strconv.ParseFloat] does not accept, an empty symbol after the
+//     space, or another token after the symbol.
+//   - [ErrUnknownUnit], for a symbol [Lookup] does not resolve — a bracketed symbol
+//     from the reserved namespace among them. A magnitude whose unit is unknown is
+//     never given the kind's base unit and never made dimensionless.
+//   - [ErrNotFinite], for a magnitude that is not one: a literal infinity or NaN
+//     ("+Inf mm", "NaN"), which [strconv.ParseFloat] accepts, and a literal past the
+//     last float64 ("1e999 mm"), which it renders as an infinity.
+//
+// The magnitude is the nearest float64 to the literal, so a literal below the smallest
+// subnormal ("1e-999 mm") is +0 — the rounding the arithmetic makes at that end of the
+// range, and the whole of what a float64 holds of such a number. [Value.MarshalText]
+// never writes one.
+//
+// A zero is read as +0 whatever its sign in the text: "-0 mm" is 0 mm, bit for bit, as
+// a Value carries no negative zero.
+func (v *Value) UnmarshalText(text []byte) error {
+	s := string(text)
+
+	// The symbol is everything past the first space, and it may hold no space of its
+	// own: a trailing space, a doubled space and a second token are all a malformed
+	// text rather than a unit, so the bare-number (dimensionless) form is the one text
+	// with no symbol, and nothing else can be read as it by accident.
+	m, symbol := s, ""
+	if before, after, found := strings.Cut(s, " "); found {
+		m, symbol = before, after
+		if symbol == "" || strings.Contains(symbol, " ") {
+			return fmt.Errorf("%w: %q is not a magnitude and a symbol", ErrMalformedText, s)
+		}
+	}
+
+	// The magnitude is the nearest float64 to the text, which is what a float64 can
+	// honestly hold of it: a literal below the smallest subnormal is +0, the rounding
+	// the arithmetic makes at that end of the range. A literal past the last float64 is
+	// no float64 at all — ParseFloat hands back an infinity and strconv.ErrRange — and
+	// an infinity is not a quantity.
+	mag, err := strconv.ParseFloat(m, 64)
+	if err != nil && !errors.Is(err, strconv.ErrRange) {
+		return fmt.Errorf("%w: %q is not a magnitude: %w", ErrMalformedText, m, err)
+	}
+	if !isFinite(mag) {
+		return fmt.Errorf("%w: %q is not a quantity", ErrNotFinite, m)
+	}
+
+	u, ok := Lookup(symbol)
+	if !ok {
+		return fmt.Errorf("%w: %q", ErrUnknownUnit, symbol)
+	}
+
+	// New canonicalises the zero: a "-0 mm" in a document is 0 mm, as it is everywhere
+	// else in the package.
+	*v = New(mag, u)
+	return nil
 }

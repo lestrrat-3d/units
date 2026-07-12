@@ -143,7 +143,41 @@ It is a **foundation module**: consumed by `github.com/lestrrat-3d/sketch` and
   exactness claim about a float64 with `==` or `require.Equal`** — it cannot see this.
 - **A `Value` is immutable.** Operations return a new `Value`. The zero `Value`
   is 0 of `One`: the zero `Unit` is read as `One`, so a `var`-declared `Value`
-  behaves as a plain 0 in every operation.
+  behaves as a plain 0 in every operation. `UnmarshalText` is the one pointer
+  method — `encoding.TextUnmarshaler` requires it — and it **assigns** the whole
+  value (`*v = New(...)`) rather than mutating a field.
+- **The text form carries the unit, and round-trips bit for bit.**
+  `Value.MarshalText`/`UnmarshalText` are `encoding.TextMarshaler`/
+  `TextUnmarshaler`, so `encoding/json` uses them: `"<magnitude> <symbol>"` —
+  `"10 mm"`, `"7850 kg/m^3"` — and the bare number for a dimensionless value, whose
+  unit `One` has an **empty symbol**. Without them a `Value`'s unexported fields
+  encode to `{}` **with a nil error**: the quantity deleted, silently, in a document
+  that is the whole reason this library exists.
+  - **The round trip is exact, not close.** The magnitude is
+    `strconv.FormatFloat(m, 'g', -1, 64)` — the shortest text that reads back as the
+    *same* float64 — and `strconv.ParseFloat` reads it; the symbol goes through
+    `Lookup`, which hands back the very unit that wrote it. `25.4 mm` is exactly
+    `1 in` on both sides of a document, and the suite asserts the round trip on
+    `math.Float64bits` over every built-in unit × a magnitude sweep (subnormals,
+    `MaxFloat64`, both zeros) **and** over 200k random bit patterns. NEVER "improve"
+    the formatting to a fixed precision — that is a lost bit, which is a lost
+    guarantee.
+  - **NEVER emit a symbol that cannot be read back.** The marshaller's check *is*
+    `Lookup`. A value of an **unnamed kind** (synthetic `[L^-1]`) is
+    `ErrUnnamedKind`, and one of an **overflowed kind** (`[overflow]`) is
+    `ErrOverflowedKind` — the "must not be persisted" rule, enforced at the one place
+    it would have been broken. A **non-finite** magnitude — `New` and friends can
+    build one — is `ErrNotFinite`: a persisted `+Inf mm` read back is a length that
+    is not a length.
+  - **NEVER guess a unit.** An unregistered symbol is `ErrUnknownUnit`; there is no
+    fallback to a base unit and no silent `One`. Malformed text (`ErrMalformedText`)
+    is anything that is not `<magnitude> <symbol>` — a trailing or doubled space, an
+    extra token, a magnitude `ParseFloat` rejects — so the bare-number dimensionless
+    form is unambiguous. A literal `+Inf`/`NaN`, or one past the last float64
+    (`1e999`), is `ErrNotFinite`; one below the smallest subnormal (`1e-999`) is the
+    nearest float64, `+0`, the same rounding the arithmetic makes there.
+  - A marshalled zero is `"0"`, and any zero in a document — `-0` included — reads
+    back as `+0`, bit for bit. The negative-zero rule holds across the boundary.
 - **NEVER persist a value of an unnamed kind.** It carries a synthetic,
   unregistered unit (`[L^-1]`) that `Lookup` cannot resolve; it is a transient
   intermediate. Every named kind has a registered base unit — convert first.
@@ -165,7 +199,7 @@ It is a **foundation module**: consumed by `github.com/lestrrat-3d/sketch` and
 |---|---|
 | `kind.go` | `Kind` — dimension exponents, the named kinds, `Mul`/`Div`/`Pow`, `Overflowed`, `String`. |
 | `unit.go` | `Unit`, the built-in unit set, `BaseUnit`, `Define`, `Lookup`, the mutex-guarded registry. |
-| `value.go` | `Value` — magnitude + unit, conversion, arithmetic, formatting. |
+| `value.go` | `Value` — magnitude + unit, conversion, arithmetic, formatting, the text form (`MarshalText`/`UnmarshalText`). |
 | `system.go` | `System` — the current default units, for presenting base-unit quantities. |
 | `doc.go` | Package doc: scope + the no-naked-float rule. |
 
