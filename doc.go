@@ -40,8 +40,8 @@
 //	l, _ := units.Liters(1).Div(units.SquareMeters(1))     // a Length
 //
 // Every operation that can report an error yields a finite result or that error,
-// never an infinity and never a NaN: a zero base magnitude in a divisor is
-// [ErrDivideByZero], and a sum, difference, product, quotient or conversion that
+// never an infinity and never a NaN: a zero divisor is [ErrDivideByZero], and a
+// sum, difference, product, quotient or conversion that
 // overflows or is a NaN is [ErrNotFinite]. That covers [Value.Add], [Value.Sub],
 // [Value.Mul], [Value.Div], [Value.In] and [Value.Convert]. The operations with
 // no error to report — [New], [FromBase], [Value.Scale] and [Value.Neg] — do not
@@ -50,10 +50,12 @@
 //
 // The error is about the result, never an intermediate. A base magnitude — a
 // magnitude times its unit's factor, what [Value.Base] returns — overflows for
-// ordinary values: [Meters](1e307) is 1e310 mm, which no float64 holds. No
-// operation forms one, so [Meters](1e307) still converts to metres, still divides
-// by itself to 1, and still equals itself. [Value.Base] is an accessor, not an
-// operation, and reports that infinity honestly.
+// ordinary values ([Meters](1e307) is 1e310 mm, which no float64 holds) and
+// underflows for others ([Grams](1e-322) is 1e-325 kg, which no float64 holds
+// either). No operation forms one, so [Meters](1e307) still converts to metres,
+// still divides by itself to 1, and still equals itself, and [Grams](1e-322) is
+// an ordinary divisor rather than a zero one. [Value.Base] is an accessor, not an
+// operation, and reports the infinity — or the zero — honestly.
 //
 // [System.In] presents a magnitude in the system's unit for the value's kind and
 // has no error to report, so a magnitude that unit cannot hold comes back as the

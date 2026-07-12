@@ -127,7 +127,9 @@ Every operation that **can** report an error yields a **finite** magnitude or th
 error — never an `±Inf`, never a `NaN`. That is `Value.Add`, `Value.Sub`,
 `Value.Mul`, `Value.Div`, `Value.In` and `Value.Convert`:
 
-- A zero base magnitude in the divisor is `ErrDivideByZero`.
+- A zero divisor is `ErrDivideByZero`. A unit's factor is positive and finite, so
+  a magnitude is zero exactly when the quantity is: a divisor that is nonzero in
+  its own unit is a real divisor, however small.
 - A sum, difference, product, quotient or conversion that overflows to an
   infinity, or that is a `NaN` (`Inf × 0`), is `ErrNotFinite`. Two sentinels, so
   the error says which thing actually happened.
@@ -174,15 +176,33 @@ through the three helpers in `value.go` — `rescale`, `product`, `quotient` —
 split their operands with `math.Frexp`, combine the mantissas (a bounded handful,
 so their product can neither overflow nor underflow), sum the binary exponents as
 `int`s, and reassemble once with `math.Ldexp`. `Ldexp` is the only step that can
-leave the float64 range, and it does so exactly when the result does. Factors that
-cancel — the same factor above and below — cancel *exactly*, so a conversion into
-a value's own unit, and a value divided by itself, are exact. A new operation gets
-this by using the helpers; reaching for `Base()` instead is how the bug comes back.
+leave the float64 range, and it does so exactly when the result does. A new
+operation gets this by using the helpers; reaching for `Base()` instead is how the
+bug comes back.
+
+**The range is free.** The exponent split is *all* the helpers do: the mantissas
+are combined in the same order, and grouped the same way, as the plain
+`mag × from ÷ to` and `(a × af) × (b × bf)` would combine the operands, so each
+rounds exactly where the plain expression rounds and no everyday conversion pays
+an ulp for the extra range. `25.4 mm` is exactly `1 in`, and `1000 g/cm³` exactly
+`1e6 kg/m³`. Factors that cancel — the same factor above and below — cancel
+*exactly*, so a value divided by itself is exact, and `rescale` returns the
+magnitude untouched when the two factors are the same, so a conversion into a
+value's own unit is the identity. The test suite pins this down against a
+`big.Rat` oracle: every built-in conversion, product and quotient must land no
+further from the true result than the plain expression it replaced. A tolerance —
+even `1e-9` — is some `10⁷` ulps and would not see a regression of this class.
 
 `Value.Base()` stays as it is: it is an **accessor**, not an operation. A value
-whose base magnitude genuinely overflows reports `+Inf` there, honestly. The one
-operation that may still read it is `Div`'s zero-divisor guard — zeroness is the
-one thing an overflow cannot corrupt.
+whose base magnitude genuinely overflows reports `+Inf` there, honestly, and one
+whose base magnitude underflows reports `0`. **No operation reads it** — not even
+`Div`'s zero-divisor guard, which reads the divisor's own magnitude: a base
+magnitude would report a divide-by-zero for an ordinary small divisor whose
+product with its factor underflows, and refuse a quotient that is perfectly
+representable. The one place a base magnitude is still formed outside the accessor
+is `System.In`'s error path, where the infinity is the answer: a magnitude the
+presentation unit cannot hold comes back as the infinity it is, never as a finite
+number in the wrong unit.
 
 `Equal` is the sharpest case, because it has no error channel at all:
 `|Inf − Inf|` is `NaN`, and `NaN <= tol` is `false`, so a value would not be equal

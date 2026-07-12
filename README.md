@@ -60,17 +60,22 @@ top of it, and depends only on the standard library.
   field left unset, or holding a unit of the wrong kind, is ignored in favour of
   the kind's base unit — the zero `System` presents every kind as itself.
 - **A result is finite, or it is an error.** `Add`, `Sub`, `Mul`, `Div`, `In` and
-  `Convert` never hand back an `+Inf` or a `NaN` with a nil error: a zero base
-  magnitude in a divisor is `ErrDivideByZero`, and an overflowing or NaN result
-  is `ErrNotFinite`. The operations that have no error to return — `New`,
-  `FromBase`, `Scale`, `Neg` — cannot check, and do not.
+  `Convert` never hand back an `+Inf` or a `NaN` with a nil error: a zero divisor
+  is `ErrDivideByZero`, and an overflowing or NaN result is `ErrNotFinite`. The
+  operations that have no error to return — `New`, `FromBase`, `Scale`, `Neg` —
+  cannot check, and do not.
 - **It is the result that must be finite, never an intermediate.** A base
   magnitude (`Value.Base()`, the magnitude in the kind's base unit) overflows for
-  ordinary values — `Meters(1e307)` is `1e310 mm` — and no operation forms one.
-  So `Meters(1e307)` converts to metres, divides by itself to `1`, multiplies by
-  `Millimeters(1e-300)` to `1e10 mm²`, and equals itself. `Base()` is an accessor
-  and reports that infinity honestly; `System.In`, which answers in the system's
-  unit for the kind, returns it rather than a finite number in another unit.
+  ordinary values — `Meters(1e307)` is `1e310 mm` — and underflows for others —
+  `Grams(1e-322)` is `1e-325 kg`. No operation forms one. So `Meters(1e307)`
+  converts to metres, divides by itself to `1`, multiplies by `Millimeters(1e-300)`
+  to `1e10 mm²`, and equals itself, and `Grams(1e-322)` is an ordinary divisor
+  rather than a zero one. `Base()` is an accessor and reports that infinity — or
+  that zero — honestly; `System.In`, which answers in the system's unit for the
+  kind, returns the infinity rather than a finite number in another unit.
+- **The range costs no accuracy.** Conversions are exact where the arithmetic is:
+  `25.4 mm` is exactly `1 in`, `1000 g/cm³` exactly `1e6 kg/m³`, a value in its own
+  unit is its own magnitude, and a value divided by itself is exactly `1`.
 - **The zero `Value` is 0 of `One`**, so a `Value` declared with `var` behaves as
   a plain 0 in every operation.
 - **Extensible.** `Define` registers a new unit against a kind; a symbol may not

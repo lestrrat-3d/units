@@ -136,8 +136,9 @@ func TestLookupAndDefine(t *testing.T) {
 	require.Panics(t, func() { units.Define("yd", units.Length, 914.4) }, "redefining a custom unit")
 }
 
-func TestLookupRoundTrip(t *testing.T) {
-	for _, u := range []units.Unit{
+// builtinUnits lists every unit the package itself registers.
+func builtinUnits() []units.Unit {
+	return []units.Unit{
 		units.One,
 		units.Millimeter, units.Centimeter, units.Meter, units.Inch, units.Foot, units.Thou,
 		units.SquareMillimeter, units.SquareCentimeter, units.SquareMeter, units.SquareInch,
@@ -146,7 +147,18 @@ func TestLookupRoundTrip(t *testing.T) {
 		units.KilogramPerCubicMillimeter, units.KilogramPerCubicMeter, units.GramPerCubicCentimeter,
 		units.KilogramSquareMillimeter, units.QuarticMillimeter,
 		units.Radian, units.Degree,
-	} {
+	}
+}
+
+// everydayMags are the magnitudes a caller actually writes. The extremes have
+// their own sweep; accuracy is judged here, where nothing can be excused as the
+// float64 range running out.
+func everydayMags() []float64 {
+	return []float64{0.001, 0.5, 1, 2, 3.7, 25.4, 100, 1000, 7850, math.Pi}
+}
+
+func TestLookupRoundTrip(t *testing.T) {
+	for _, u := range builtinUnits() {
 		t.Run(u.String(), func(t *testing.T) {
 			got, ok := units.Lookup(u.Symbol())
 			require.True(t, ok, "every built-in symbol must round-trip through Lookup")
@@ -262,10 +274,26 @@ func TestDivideByZero(t *testing.T) {
 	_, err = units.SquareMeters(1).Div(units.SquareMillimeters(0))
 	require.ErrorIs(t, err, units.ErrDivideByZero, "zero in another unit is still zero")
 
-	// A divisor that is nonzero in its own unit but underflows to zero in the
-	// base unit is still a division by zero.
+	// A divisor that is nonzero in its own unit is a real divisor, even where its
+	// base magnitude underflows to zero: it is the quotient that overflows, so the
+	// error says overflow rather than a zero divisor.
 	_, err = units.Millimeters(1).Div(units.KilogramsPerCubicMeter(1e-320))
-	require.ErrorIs(t, err, units.ErrDivideByZero, "a divisor that underflows to a zero base")
+	require.ErrorIs(t, err, units.ErrNotFinite, "a divisor whose base magnitude underflows is not zero")
+	require.NotErrorIs(t, err, units.ErrDivideByZero, "the divisor is not zero")
+
+	// …and where the quotient is representable, it comes back: a value divided by
+	// itself is 1 however small its base magnitude.
+	q, err := units.Grams(1e-322).Div(units.Grams(1e-322))
+	require.NoError(t, err, "a divisor whose base magnitude underflows to zero still divides")
+	require.Equal(t, units.Scalar(1), q)
+
+	// …and where both base magnitudes underflow, the quotient of the magnitudes
+	// themselves is still the answer. 1e-320 is a subnormal, so it is the float64
+	// beside it — not the decimal — that the quotient is taken against.
+	tiny := units.KilogramsPerCubicMeter(1e-320)
+	q, err = units.KilogramsPerCubicMeter(1e-300).Div(tiny)
+	require.NoError(t, err)
+	require.InEpsilon(t, 1e-300/tiny.Mag(), q.Mag(), 1e-15, "both base magnitudes underflow; the quotient does not")
 
 	// A subnormal divisor does not underflow, but blows the quotient up to +Inf.
 	// The contract is a finite quotient or an error, never an infinity — and the
@@ -278,7 +306,7 @@ func TestDivideByZero(t *testing.T) {
 	require.ErrorIs(t, err, units.ErrNotFinite, "…and in the negative direction")
 
 	// The finite quotients around it still divide.
-	q, err := units.Millimeters(1).Div(units.Kilograms(2))
+	q, err = units.Millimeters(1).Div(units.Kilograms(2))
 	require.NoError(t, err)
 	require.InDelta(t, 0.5, q.Base(), 1e-9)
 }
@@ -919,6 +947,33 @@ func baseRat(t *testing.T, v units.Value) *big.Rat {
 	return new(big.Rat).Mul(m, f)
 }
 
+// ulpErr returns the distance from got to want, measured in ulps of want: the
+// unit in the last place of the float64 nearest the true result. A correctly
+// rounded result is at most 0.5 ulp out; anything above 1 ulp is a rounding the
+// expression did not have to make.
+func ulpErr(t *testing.T, got float64, want *big.Rat) float64 {
+	t.Helper()
+
+	w, _ := want.Float64()
+	require.False(t, math.IsInf(w, 0), "the true result %s is representable", want.FloatString(3))
+	if w == 0 {
+		require.InDelta(t, 0, got, 0, "the true result is zero")
+		return 0
+	}
+
+	// want == mantissa × 2**e with the mantissa in [0.5, 1), so the last place of
+	// the 53-bit significand is 2**(e-53).
+	_, e := math.Frexp(w)
+	ulp := math.Ldexp(1, e-53)
+	if ulp == 0 {
+		ulp = math.SmallestNonzeroFloat64 // a subnormal true result
+	}
+
+	diff := new(big.Rat).Abs(new(big.Rat).Sub(ratOf(t, got), want))
+	n, _ := new(big.Rat).Quo(diff, ratOf(t, ulp)).Float64()
+	return n
+}
+
 func ratOf(t *testing.T, x float64) *big.Rat {
 	t.Helper()
 
@@ -1006,6 +1061,8 @@ func extremes() []units.Value {
 		units.Kilograms(1e300),
 		units.SquareMeters(1e300),
 		units.CubicMillimeters(5e-324),
+		units.Grams(1e-322),                  // a base magnitude that underflows to zero…
+		units.KilogramsPerCubicMeter(1e-320), // …and one that underflows harder
 	}
 }
 
@@ -1022,6 +1079,8 @@ func unitsOfKind(k units.Kind) []units.Unit {
 		return []units.Unit{units.SquareMillimeter, units.SquareMeter, units.SquareInch}
 	case units.Volume:
 		return []units.Unit{units.CubicMillimeter, units.CubicCentimeter, units.Liter}
+	case units.Density:
+		return []units.Unit{units.KilogramPerCubicMillimeter, units.KilogramPerCubicMeter, units.GramPerCubicCentimeter}
 	case units.Dimensionless:
 		return []units.Unit{units.One}
 	}
@@ -1133,9 +1192,10 @@ func TestExtremeMatrix(t *testing.T) {
 			for _, b := range extremes() {
 				q, err := a.Div(b)
 
-				// A divisor whose base magnitude is zero — genuinely, or by
-				// underflow — is a division by zero, not an infinity.
-				if b.Base() == 0 {
+				// Only a zero divisor is a division by zero. A divisor that is
+				// nonzero in its own unit divides — even where its base magnitude
+				// underflows to zero — so the oracle below runs on it.
+				if b.Mag() == 0 {
 					require.ErrorIs(t, err, units.ErrDivideByZero, "%s / %s", a, b)
 					continue
 				}
@@ -1213,6 +1273,162 @@ func TestExtremeMatrix(t *testing.T) {
 				a := sys.AngleFromBase(base)
 				require.Equal(t, units.Angle, a.Kind())
 				requireFloat(t, a.Mag(), new(big.Rat).Quo(ratOf(t, base), ratOf(t, sys.UnitFor(units.Angle).Factor())))
+			}
+		}
+	})
+}
+
+func TestConversionIsExact(t *testing.T) {
+	// The conversions a caller reads off the screen are exact, not merely close.
+	// A relative tolerance of 1e-9 is some 1e7 ulps: it cannot tell an exact 1 in
+	// from a 0.9999999999999999, which is why these are bit-for-bit assertions.
+	in, err := units.Millimeters(25.4).In(units.Inch)
+	require.NoError(t, err)
+	require.Equal(t, 1.0, in, "25.4 mm is exactly 1 in")
+
+	d, err := units.GramsPerCubicCentimeter(1000).In(units.KilogramPerCubicMeter)
+	require.NoError(t, err)
+	require.Equal(t, 1e6, d, "1000 g/cm^3 is exactly 1e6 kg/m^3")
+
+	t.Run("a value in the unit it already carries", func(t *testing.T) {
+		mags := append(everydayMags(), 5e-324, 1e-322, 1e-300, 1e307, -1e307, math.MaxFloat64)
+		for _, u := range builtinUnits() {
+			for _, m := range mags {
+				v := units.New(m, u)
+
+				got, err := v.In(u)
+				require.NoError(t, err, "a value is always expressible in its own unit: %s", v)
+				require.Equal(t, v.Mag(), got, "%s in its own unit is its own magnitude", v)
+
+				c, err := v.Convert(u)
+				require.NoError(t, err)
+				require.Equal(t, v, c, "…and Convert hands back the value itself")
+			}
+		}
+	})
+
+	t.Run("a value divided by itself is exactly 1", func(t *testing.T) {
+		mags := append(everydayMags(), 5e-324, 1e-322, 1e-300, 1e307, -1e307, math.MaxFloat64)
+		for _, u := range builtinUnits() {
+			for _, m := range mags {
+				v := units.New(m, u)
+
+				q, err := v.Div(v)
+				require.NoError(t, err, "a value divides by itself, however large or small its base magnitude: %s", v)
+				require.Equal(t, units.Scalar(1), q, "%s divided by itself is 1", v)
+			}
+		}
+	})
+}
+
+func TestEqualIsSymmetric(t *testing.T) {
+	// An equality predicate whose answer depends on the order of its operands is
+	// broken whichever answer it gives.
+	require.True(t, units.Millimeters(25.4).Equal(units.Inches(1), 0), "25.4 mm is one inch")
+	require.True(t, units.Inches(1).Equal(units.Millimeters(25.4), 0), "…in either order")
+
+	for _, ua := range builtinUnits() {
+		for _, ub := range builtinUnits() {
+			for _, m := range everydayMags() {
+				a, b := units.New(m, ua), units.New(m, ub)
+
+				for _, tol := range []float64{0, 1e-9, 1e9} {
+					require.Equal(t, a.Equal(b, tol), b.Equal(a, tol),
+						"Equal is symmetric: %s, %s at tol %v", a, b, tol)
+				}
+
+				if ua.Kind() != ub.Kind() {
+					continue
+				}
+
+				// The sharp case: c is a's own quantity, carried in another unit, and
+				// both directions agree it is the same quantity. A conversion that is
+				// not exact rounds, so the tolerance is relative to the quantity —
+				// below the last place of its own magnitude, no tolerance is symmetric
+				// and none is meaningful.
+				c, err := a.Convert(ub)
+				require.NoError(t, err)
+				tol := math.Abs(a.Base())*1e-12 + 1e-12
+				require.True(t, a.Equal(c, tol), "%s is %s", a, c)
+				require.True(t, c.Equal(a, tol), "…and %s is %s, whichever side it is read from", c, a)
+			}
+		}
+	}
+}
+
+func TestArithmeticIsNoWorseThanNaive(t *testing.T) {
+	// The Frexp/Ldexp helpers exist to keep an intermediate in range, not to buy
+	// that range with accuracy. Against an exact-rational oracle, every operation
+	// must land no further from the true result than the plain expression it
+	// replaced — the one assertion a relative-tolerance oracle cannot make, since
+	// a regression of an ulp is invisible at 1e-9.
+	t.Run("In", func(t *testing.T) {
+		for _, from := range builtinUnits() {
+			for _, to := range builtinUnits() {
+				if from.Kind() != to.Kind() {
+					continue
+				}
+
+				for _, m := range everydayMags() {
+					v := units.New(m, from)
+
+					got, err := v.In(to)
+					require.NoError(t, err, "%s in %s", v, to)
+
+					want := new(big.Rat).Quo(
+						new(big.Rat).Mul(ratOf(t, m), ratOf(t, from.Factor())),
+						ratOf(t, to.Factor()))
+					naive := m * from.Factor() / to.Factor()
+
+					require.LessOrEqual(t, ulpErr(t, got, want), ulpErr(t, naive, want),
+						"%v %s in %s: %v is further from the true result than the plain %v", m, from, to, got, naive)
+				}
+			}
+		}
+	})
+
+	t.Run("Mul", func(t *testing.T) {
+		for _, ua := range builtinUnits() {
+			for _, ub := range builtinUnits() {
+				for _, ma := range everydayMags() {
+					for _, mb := range everydayMags() {
+						a, b := units.New(ma, ua), units.New(mb, ub)
+
+						p, err := a.Mul(b)
+						require.NoError(t, err, "%s x %s", a, b)
+
+						want := new(big.Rat).Mul(
+							new(big.Rat).Mul(ratOf(t, ma), ratOf(t, ua.Factor())),
+							new(big.Rat).Mul(ratOf(t, mb), ratOf(t, ub.Factor())))
+						naive := (ma * ua.Factor()) * (mb * ub.Factor())
+
+						require.LessOrEqual(t, ulpErr(t, p.Mag(), want), ulpErr(t, naive, want),
+							"%s x %s: %v is further from the true result than the plain %v", a, b, p.Mag(), naive)
+					}
+				}
+			}
+		}
+	})
+
+	t.Run("Div", func(t *testing.T) {
+		for _, ua := range builtinUnits() {
+			for _, ub := range builtinUnits() {
+				for _, ma := range everydayMags() {
+					for _, mb := range everydayMags() {
+						a, b := units.New(ma, ua), units.New(mb, ub)
+
+						q, err := a.Div(b)
+						require.NoError(t, err, "%s / %s", a, b)
+
+						want := new(big.Rat).Quo(
+							new(big.Rat).Mul(ratOf(t, ma), ratOf(t, ua.Factor())),
+							new(big.Rat).Mul(ratOf(t, mb), ratOf(t, ub.Factor())))
+						naive := (ma * ua.Factor()) / (mb * ub.Factor())
+
+						require.LessOrEqual(t, ulpErr(t, q.Mag(), want), ulpErr(t, naive, want),
+							"%s / %s: %v is further from the true result than the plain %v", a, b, q.Mag(), naive)
+					}
+				}
 			}
 		}
 	})

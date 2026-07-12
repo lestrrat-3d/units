@@ -11,8 +11,9 @@ import (
 // (for example adding a length to an angle).
 var ErrIncompatible = errors.New("units: incompatible kinds")
 
-// ErrDivideByZero is returned by [Value.Div] when the divisor's base magnitude
-// is zero.
+// ErrDivideByZero is returned by [Value.Div] when the divisor is zero. A unit's
+// factor is positive and finite, so a zero magnitude is the whole of it: a
+// divisor that is nonzero in its own unit is a real divisor, however small.
 var ErrDivideByZero = errors.New("units: division by zero")
 
 // ErrNotFinite is returned by [Value.Add], [Value.Sub], [Value.Mul], [Value.Div],
@@ -205,15 +206,16 @@ func (v Value) Mul(o Value) (Value, error) {
 // result's magnitude).
 //
 // The quotient is finite whenever the quotient itself is representable — a value
-// divided by itself is 1 however large its base magnitude. A zero base magnitude
-// in the divisor is [ErrDivideByZero], and a divisor small enough — or a
-// dividend large enough — to blow the quotient up to an infinity or a NaN is
-// [ErrNotFinite].
+// divided by itself is 1 however large or small its base magnitude. A zero
+// divisor is [ErrDivideByZero], and a divisor small enough — or a dividend large
+// enough — to blow the quotient up to an infinity or a NaN is [ErrNotFinite].
 func (v Value) Div(o Value) (Value, error) {
-	// The one thing an overflowing base magnitude cannot corrupt is whether it is
-	// zero, so the divisor's guard may read it: an infinity is not zero, and a
-	// base that underflows to zero is a zero divisor by contract.
-	if o.Base() == 0 {
+	// The divisor's own magnitude is the guard, never its base magnitude: a unit's
+	// factor is positive and finite, so a magnitude is zero exactly when the
+	// quantity is. A base magnitude would say zero for an ordinary small divisor
+	// whose product with its factor underflows, and report a divide-by-zero for a
+	// quotient that is perfectly ordinary.
+	if o.mag == 0 {
 		return Value{}, fmt.Errorf("%w: cannot divide %s by %s", ErrDivideByZero, v, o)
 	}
 	q := quotient(v.mag, v.Unit().factor, o.mag, o.Unit().factor)
@@ -236,29 +238,43 @@ func isFinite(x float64) bool { return !math.IsInf(x, 0) && !math.IsNaN(x) }
 // binary exponent, combines the mantissas — a bounded handful of them, so their
 // product can neither overflow nor underflow — sums the exponents as ints, and
 // reassembles once with [math.Ldexp]. Ldexp is the only step that can leave the
-// float64 range, and it does so exactly when the result does. Mantissas that
-// cancel — the same factor above and below — cancel exactly, so a conversion
-// into a value's own unit, or a value divided by itself, is exact.
+// float64 range, and it does so exactly when the result does. The exponent split
+// is all it is: the mantissas are combined in the same order, and grouped the
+// same way, as the plain arithmetic would combine the operands, so each helper
+// rounds exactly where the plain expression rounds and no conversion pays for
+// the extra range. Mantissas that cancel — the same factor above and below —
+// cancel exactly, so a value divided by itself is exact, and [rescale] returns
+// the magnitude untouched when the two factors are the same.
 //
 // An infinity or a NaN operand survives Frexp unchanged and propagates as it
 // would have through the plain arithmetic, so Inf × 0 is still a NaN.
 
 // rescale returns m × (from / to): a magnitude carried in a unit of factor from,
-// expressed in a unit of factor to. from == to returns m exactly.
+// expressed in a unit of factor to. from == to returns m exactly, so a value is
+// always expressible in the unit it already carries.
+//
+// The mantissas are combined in the same order as the plain m × from ÷ to, so
+// the rounding is the plain expression's — the exponent split costs no accuracy,
+// it only keeps the intermediate in range.
 func rescale(m, from, to float64) float64 {
+	if from == to {
+		return m
+	}
 	fm, em := math.Frexp(m)
 	ffrom, efrom := math.Frexp(from)
 	fto, eto := math.Frexp(to)
-	return math.Ldexp(fm*(ffrom/fto), em+efrom-eto)
+	return math.Ldexp(fm*ffrom/fto, em+efrom-eto)
 }
 
 // product returns (a × af) × (b × bf): two magnitudes multiplied in base units.
+// The mantissas are grouped as the plain expression groups them, so the rounding
+// is the plain expression's.
 func product(a, af, b, bf float64) float64 {
 	fa, ea := math.Frexp(a)
 	faf, eaf := math.Frexp(af)
 	fb, eb := math.Frexp(b)
 	fbf, ebf := math.Frexp(bf)
-	return math.Ldexp(fa*faf*fb*fbf, ea+eaf+eb+ebf)
+	return math.Ldexp((fa*faf)*(fb*fbf), ea+eaf+eb+ebf)
 }
 
 // quotient returns (a × af) ÷ (b × bf): two magnitudes divided in base units.

@@ -40,15 +40,25 @@ It is a **foundation module**: consumed by `github.com/lestrrat-3d/sketch` and
   their docs. Likewise a unit's factor: `Define` panics on a zero, negative,
   infinite or NaN factor.
 - **NEVER form a base magnitude as an intermediate.** `mag * unit.factor` — what
-  `Value.Base()` returns — overflows for ordinary values: `Meters(1e307)` is
-  `1e310 mm`, `+Inf`. `ErrNotFinite` is about the **result**, so an operation
-  that routed through `Base()` would refuse a representable result, or (`Equal`,
-  `System.In` — no error channel) return a wrong one. Every operation does its
-  arithmetic through `rescale`/`product`/`quotient` in `value.go`, which work on
-  the `math.Frexp` mantissa and exponent and reassemble once with `math.Ldexp`;
-  a new operation MUST use them. `Base()` stays a public **accessor** — it may
-  honestly report `+Inf` — and the only operation that may read it is `Div`'s
-  zero-divisor guard, since zeroness is what an overflow cannot corrupt.
+  `Value.Base()` returns — overflows for ordinary values (`Meters(1e307)` is
+  `1e310 mm`, `+Inf`) and underflows for others (`Grams(1e-322)` is `1e-325 kg`,
+  `0`). `ErrNotFinite` is about the **result**, so an operation that routed
+  through `Base()` would refuse a representable result, report a divide-by-zero
+  for a nonzero divisor, or (`Equal`, `System.In` — no error channel) return a
+  wrong one. Every operation does its arithmetic through
+  `rescale`/`product`/`quotient` in `value.go`, which work on the `math.Frexp`
+  mantissa and exponent and reassemble once with `math.Ldexp`; a new operation
+  MUST use them, and `Div`'s zero guard reads the divisor's own **magnitude**
+  (a unit factor is positive and finite, so `mag == 0` iff the quantity is zero).
+  `Base()` stays a public **accessor** — it may honestly report `+Inf` or `0` —
+  and no operation reads it.
+- **The helpers keep the plain expression's rounding.** The `Frexp`/`Ldexp` split
+  buys range, and it MUST NOT be paid for in accuracy: the mantissas are combined
+  in the same order, and grouped the same way, as the plain `mag * from / to` and
+  `(a * af) * (b * bf)` — reassociating them adds a rounding, and `25.4 mm` stops
+  being exactly `1 in`. The suite asserts exactness and a no-worse-than-naive ulp
+  bound against a `big.Rat` oracle; a relative tolerance (even `1e-9`, some `10⁷`
+  ulps) cannot gate this class, so NEVER assert an accuracy claim with one.
 - **NEVER hand back a finite number in a unit it is not in.** `System.In` answers
   in `UnitFor(v.Kind())` — always. A magnitude that unit cannot hold comes back
   as the infinity it is; `System.Display` returns a value it cannot carry in the
