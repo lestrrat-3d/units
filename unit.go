@@ -3,6 +3,7 @@ package units
 import (
 	"math"
 	"strconv"
+	"strings"
 )
 
 // Unit is a unit of measure. Units are values, compared by identity of their
@@ -12,6 +13,8 @@ import (
 //
 // Symbols are ASCII. A dimension exponent is written with a caret and a digit:
 // "mm^2" is the square millimetre, "kg/mm^3" the kilogram per cubic millimetre.
+// A symbol opening with "[" is reserved for the library's synthetic units (see
+// [Define]).
 type Unit struct {
 	symbol string
 	kind   Kind
@@ -39,7 +42,8 @@ func (u Unit) String() string {
 
 // The built-in units. Every kind with a name has a base unit, whose factor is 1:
 // [One], [Millimeter], [SquareMillimeter], [CubicMillimeter], [Kilogram],
-// [KilogramPerCubicMillimeter] and [Radian].
+// [KilogramPerCubicMillimeter], [Radian], [KilogramSquareMillimeter] and
+// [QuarticMillimeter].
 var (
 	// One is the dimensionless unit.
 	One = defineBase("", Dimensionless)
@@ -80,6 +84,13 @@ var (
 	KilogramPerCubicMeter      = define("kg/m^3", Density, 1e-9)
 	GramPerCubicCentimeter     = define("g/cm^3", Density, 1e-6)
 
+	// KilogramSquareMillimeter measures [MomentOfInertia] (M·L²); it is the base
+	// unit.
+	KilogramSquareMillimeter = defineBase("kg*mm^2", MomentOfInertia)
+
+	// QuarticMillimeter measures [SecondMomentOfArea] (L⁴); it is the base unit.
+	QuarticMillimeter = defineBase("mm^4", SecondMomentOfArea)
+
 	// Radian and Degree measure [Angle]; the radian is the base unit.
 	Radian = defineBase("rad", Angle)
 	Degree = define("deg", Angle, math.Pi/180)
@@ -102,18 +113,23 @@ func BaseUnit(k Kind) (Unit, bool) {
 }
 
 // baseUnitFor returns the unit a composed [Value] is carried in: the kind's
-// registered base unit when it has one, and otherwise an ad-hoc unit of factor
-// 1 whose symbol is the kind's exponent form. That ad-hoc unit is not added to
-// the registry, so [Lookup] does not find it and [BaseUnit] still reports the
-// kind as having none.
+// registered base unit when it has one, and otherwise a synthetic unit of factor
+// 1 whose symbol is the kind's canonical bracketed form ("[L^-1]"). That
+// synthetic unit is not added to the registry, so [Lookup] does not find it and
+// [BaseUnit] still reports the kind as having none. A value carrying one is a
+// transient intermediate and must not be persisted: convert it to a named kind
+// first.
 func baseUnitFor(k Kind) Unit {
 	if u, ok := baseUnits[k]; ok {
 		return u
 	}
-	return Unit{symbol: k.String(), kind: k, factor: 1}
+	return Unit{symbol: k.canonicalSymbol(), kind: k, factor: 1}
 }
 
 func define(symbol string, kind Kind, factor float64) Unit {
+	if strings.HasPrefix(symbol, "[") {
+		panic("units: unit symbol namespace is reserved: " + strconv.Quote(symbol))
+	}
 	if _, dup := registry[symbol]; dup {
 		panic("units: unit symbol already defined: " + strconv.Quote(symbol))
 	}
@@ -136,6 +152,11 @@ func defineBase(symbol string, kind Kind) Unit {
 // Redefining a symbol would change the meaning of every value that names it,
 // including the built-ins, so a collision is a programming error rather than an
 // intent to replace.
+//
+// Symbols opening with "[" are reserved for the library: Define panics on one.
+// That is the namespace of the synthetic units a [Value] of an unnamed kind is
+// carried in ("[L^-1]"). Registering a unit there would let a persisted symbol
+// deserialize as a kind other than the one it was written with.
 func Define(symbol string, kind Kind, factorToBase float64) Unit {
 	return define(symbol, kind, factorToBase)
 }

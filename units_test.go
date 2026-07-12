@@ -3,6 +3,7 @@ package units_test
 import (
 	"math"
 	"testing"
+	"unicode/utf8"
 
 	"github.com/lestrrat-3d/units"
 	"github.com/stretchr/testify/require"
@@ -140,6 +141,7 @@ func TestLookupRoundTrip(t *testing.T) {
 		units.CubicMillimeter, units.CubicCentimeter, units.CubicMeter, units.CubicInch, units.Liter,
 		units.Kilogram, units.Gram, units.Pound,
 		units.KilogramPerCubicMillimeter, units.KilogramPerCubicMeter, units.GramPerCubicCentimeter,
+		units.KilogramSquareMillimeter, units.QuarticMillimeter,
 		units.Radian, units.Degree,
 	} {
 		t.Run(u.String(), func(t *testing.T) {
@@ -161,6 +163,8 @@ func TestBaseUnits(t *testing.T) {
 		{units.Volume, units.CubicMillimeter},
 		{units.Mass, units.Kilogram},
 		{units.Density, units.KilogramPerCubicMillimeter},
+		{units.MomentOfInertia, units.KilogramSquareMillimeter},
+		{units.SecondMomentOfArea, units.QuarticMillimeter},
 		{units.Angle, units.Radian},
 	} {
 		t.Run(tc.kind.String(), func(t *testing.T) {
@@ -227,16 +231,16 @@ func TestDiv(t *testing.T) {
 	require.InDelta(t, 1000, ratio.Base(), 1e-9)
 
 	// An unnamed kind has no registered base unit, but a value can still carry
-	// it: the ad-hoc unit has factor 1 and prints the kind's exponent form.
+	// it: the synthetic unit has factor 1 and an ASCII, bracketed symbol.
 	curvature, err := units.Scalar(1).Div(units.Millimeters(4))
 	require.NoError(t, err)
 	require.Equal(t, units.Dimensionless.Div(units.Length), curvature.Kind())
 	require.InDelta(t, 0.25, curvature.Base(), 1e-9, "1/4 mm^-1")
-	require.Equal(t, "L⁻¹", curvature.Unit().Symbol())
+	require.Equal(t, "[L^-1]", curvature.Unit().Symbol())
 	_, ok := units.BaseUnit(curvature.Kind())
 	require.False(t, ok, "no base unit is registered for an unnamed kind")
-	_, ok = units.Lookup("L⁻¹")
-	require.False(t, ok, "an ad-hoc unit is not added to the registry")
+	_, ok = units.Lookup("[L^-1]")
+	require.False(t, ok, "a synthetic unit is not added to the registry")
 
 	// Round trip: multiplying the inverse length back by a length is a number.
 	back, err := curvature.Mul(units.Millimeters(8))
@@ -254,6 +258,147 @@ func TestDivideByZero(t *testing.T) {
 
 	_, err = units.SquareMeters(1).Div(units.SquareMillimeters(0))
 	require.ErrorIs(t, err, units.ErrDivideByZero, "zero in another unit is still zero")
+
+	// A divisor that is nonzero in its own unit but underflows to zero in the
+	// base unit is still a division by zero.
+	_, err = units.Millimeters(1).Div(units.KilogramsPerCubicMeter(1e-320))
+	require.ErrorIs(t, err, units.ErrDivideByZero, "a divisor that underflows to a zero base")
+
+	// A subnormal divisor does not underflow, but blows the quotient up to +Inf.
+	// The contract is a finite quotient or an error, never an infinity.
+	_, err = units.Millimeters(1).Div(units.Kilograms(5e-324))
+	require.ErrorIs(t, err, units.ErrDivideByZero, "a divisor that overflows the quotient")
+
+	_, err = units.Millimeters(-1).Div(units.Kilograms(5e-324))
+	require.ErrorIs(t, err, units.ErrDivideByZero, "…and in the negative direction")
+
+	// The finite quotients around it still divide.
+	q, err := units.Millimeters(1).Div(units.Kilograms(2))
+	require.NoError(t, err)
+	require.InDelta(t, 0.5, q.Base(), 1e-9)
+}
+
+func TestNamedKindsHaveBaseUnits(t *testing.T) {
+	// Every named kind has a registered base unit, so no composition of named
+	// kinds ever falls back to a synthetic unit.
+	for _, k := range []units.Kind{
+		units.Dimensionless, units.Length, units.Area, units.Volume, units.Angle,
+		units.Mass, units.Density, units.MomentOfInertia, units.SecondMomentOfArea,
+	} {
+		t.Run(k.String(), func(t *testing.T) {
+			u, ok := units.BaseUnit(k)
+			require.True(t, ok, "a named kind must have a base unit")
+			require.Equal(t, k, u.Kind())
+			require.InDelta(t, 1, u.Factor(), 0, "a base unit has factor 1")
+
+			got, ok := units.Lookup(u.Symbol())
+			require.True(t, ok, "a base unit's symbol must resolve through Lookup")
+			require.Equal(t, u, got)
+		})
+	}
+}
+
+func TestComposedNamedKinds(t *testing.T) {
+	// mass x area is a moment of inertia, and it lands in a registered unit
+	// whose symbol round-trips — not in a synthetic one named after the kind.
+	moi, err := units.Kilograms(2).Mul(units.SquareMillimeters(3))
+	require.NoError(t, err)
+	require.Equal(t, units.MomentOfInertia, moi.Kind())
+	require.Equal(t, units.KilogramSquareMillimeter, moi.Unit())
+	require.Equal(t, "kg*mm^2", moi.Unit().Symbol())
+	require.InDelta(t, 6, moi.Mag(), 1e-9)
+	u, ok := units.Lookup("kg*mm^2")
+	require.True(t, ok, "the moment-of-inertia base unit is registered")
+	require.Equal(t, units.KilogramSquareMillimeter, u)
+
+	// area x area is a second moment of area, likewise.
+	smoa, err := units.SquareMillimeters(2).Mul(units.SquareMillimeters(3))
+	require.NoError(t, err)
+	require.Equal(t, units.SecondMomentOfArea, smoa.Kind())
+	require.Equal(t, units.QuarticMillimeter, smoa.Unit())
+	require.Equal(t, "6 mm^4", smoa.String())
+	u, ok = units.Lookup("mm^4")
+	require.True(t, ok, "the second-moment-of-area base unit is registered")
+	require.Equal(t, units.QuarticMillimeter, u)
+
+	// A system presents them in their base units rather than as bare numbers.
+	m := units.Metric()
+	require.Equal(t, units.KilogramSquareMillimeter, m.UnitFor(units.MomentOfInertia))
+	require.Equal(t, units.QuarticMillimeter, m.UnitFor(units.SecondMomentOfArea))
+}
+
+func TestSyntheticUnitSymbol(t *testing.T) {
+	// A value of an unnamed kind carries a synthetic unit whose symbol is ASCII,
+	// bracketed, and unmistakably not a real unit — never the kind's prose name.
+	for _, tc := range []struct {
+		name string
+		val  func() (units.Value, error)
+		want string
+	}{
+		{
+			name: "inverse length",
+			val:  func() (units.Value, error) { return units.Scalar(1).Div(units.Millimeters(4)) },
+			want: "[L^-1]",
+		},
+		{
+			name: "inverse area",
+			val:  func() (units.Value, error) { return units.Scalar(1).Div(units.SquareMillimeters(4)) },
+			want: "[L^-2]",
+		},
+		{
+			name: "areal density",
+			val:  func() (units.Value, error) { return units.Kilograms(1).Div(units.SquareMillimeters(4)) },
+			want: "[L^-2*M]",
+		},
+		{
+			name: "length per angle",
+			val:  func() (units.Value, error) { return units.Millimeters(1).Div(units.Radians(4)) },
+			want: "[L*A^-1]",
+		},
+		{
+			name: "mass angle",
+			val:  func() (units.Value, error) { return units.Kilograms(1).Mul(units.Radians(4)) },
+			want: "[M*A]",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			v, err := tc.val()
+			require.NoError(t, err)
+			require.Equal(t, tc.want, v.Unit().Symbol())
+			for _, r := range v.Unit().Symbol() {
+				require.Less(t, r, rune(utf8.RuneSelf), "a unit symbol is ASCII")
+			}
+
+			// The synthetic symbol is not a registry key, and the kind still
+			// honestly reports that it has no base unit.
+			_, ok := units.Lookup(v.Unit().Symbol())
+			require.False(t, ok, "a synthetic unit is not registered")
+			_, ok = units.BaseUnit(v.Kind())
+			require.False(t, ok, "an unnamed kind has no base unit")
+
+			// Kind.String stays display text; it is never the unit symbol.
+			require.NotEqual(t, v.Kind().String(), v.Unit().Symbol())
+			require.InDelta(t, 1, v.Unit().Factor(), 0, "a synthetic unit has factor 1")
+		})
+	}
+}
+
+func TestReservedSymbolNamespace(t *testing.T) {
+	// Bracketed symbols belong to the library: a consumer that could register one
+	// could make a persisted synthetic symbol deserialize as a different kind.
+	for _, symbol := range []string{"[L^-1]", "[", "[L^2*M]", "[anything]"} {
+		t.Run(symbol, func(t *testing.T) {
+			require.Panics(t, func() { units.Define(symbol, units.Length, 999) },
+				"the bracketed namespace is reserved")
+			_, ok := units.Lookup(symbol)
+			require.False(t, ok, "a rejected symbol must not be registered")
+		})
+	}
+
+	// The kind's prose name is not a unit symbol either, so nothing composed can
+	// collide with one.
+	_, ok := units.Lookup("moment of inertia")
+	require.False(t, ok, "a kind name is never a registered symbol")
 }
 
 func TestConversionDerived(t *testing.T) {

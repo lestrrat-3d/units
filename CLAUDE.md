@@ -31,6 +31,9 @@ It is a **foundation module**: consumed by `github.com/lestrrat-3d/sketch` and
 - **NEVER return a naked `float64`** for a quantity that has a unit. That is the
   bug this library exists to prevent.
 - **A `Value` is immutable.** Operations return a new `Value`.
+- **NEVER persist a value of an unnamed kind.** It carries a synthetic,
+  unregistered unit (`[L^-1]`) that `Lookup` cannot resolve; it is a transient
+  intermediate. Every named kind has a registered base unit — convert first.
 
 ## Layout
 
@@ -49,7 +52,10 @@ It is a **foundation module**: consumed by `github.com/lestrrat-3d/sketch` and
 - Docs state **current state only** — no changelogs, no "was X, now Y".
 - **Unit symbols are ASCII**, with a caret for an exponent: `mm^2`, `in^3`,
   `kg/m^3`. `Kind.String()` is the one place Unicode superscripts appear (`L⁻¹`),
-  and it is display text, never a registry key.
+  and it is display text, never a unit symbol or a registry key.
+- **`[…]` is a reserved symbol namespace.** The synthetic unit a value of an
+  unnamed kind carries is `Kind.canonicalSymbol()` (`[L^-1]`, `[L^2*M]`, ASCII,
+  order L·M·A). `Define` panics on a symbol opening with `[`.
 
 ## Verification
 

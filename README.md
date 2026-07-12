@@ -46,13 +46,18 @@ top of it, and depends only on the standard library.
 - **An angle is its own dimension**, even though a radian is physically a ratio
   of two lengths, so a bare number can never pass as an angle. The one carve-out
   is that `Add`/`Sub` accept an angle and a dimensionless value together.
-- **Base units** are the millimetre (`Length`), the square millimetre (`Area`),
-  the cubic millimetre (`Volume`), the kilogram (`Mass`), the kilogram per cubic
-  millimetre (`Density`) and the radian (`Angle`). Every unit stores its factor
-  to its kind's base. Symbols are ASCII, with a caret for an exponent: `mm^2`,
-  `in^3`, `kg/m^3`.
+- **Every named kind has a base unit**: the millimetre (`Length`), the square
+  millimetre (`Area`), the cubic millimetre (`Volume`), the kilogram (`Mass`),
+  the kilogram per cubic millimetre (`Density`), the kilogram square millimetre
+  (`MomentOfInertia`), the quartic millimetre (`SecondMomentOfArea`) and the
+  radian (`Angle`). Every unit stores its factor to its kind's base. Symbols are
+  ASCII, with a caret for an exponent: `mm^2`, `in^3`, `kg/m^3`.
+- **A value of an unnamed kind is transient.** It carries a synthetic,
+  unregistered unit whose symbol is bracketed (`[L^-1]`) — `Lookup` will not
+  resolve it, so it must not be persisted. Compose it back into a named kind
+  first.
 - **Extensible.** `Define` registers a new unit against a kind; a symbol may not
-  be redefined.
+  be redefined, and symbols opening with `[` are reserved for the library.
 
 ## License
 

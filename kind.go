@@ -89,17 +89,19 @@ func (k Kind) Div(o Kind) Kind {
 }
 
 // Pow returns the kind of k raised to the n-th power: the exponents of k scaled
-// by n. Pow(0) is [Dimensionless] and Pow(1) is k.
+// by n. Pow(0) is [Dimensionless] and Pow(1) is k. An n far outside the exponent
+// range saturates to an endpoint, preserving sign, rather than wrapping.
 func (k Kind) Pow(n int) Kind {
 	return Kind{
-		l: clampExp(int64(k.l) * int64(n)),
-		m: clampExp(int64(k.m) * int64(n)),
-		a: clampExp(int64(k.a) * int64(n)),
+		l: scaleExp(k.l, n),
+		m: scaleExp(k.m, n),
+		a: scaleExp(k.a, n),
 	}
 }
 
 // String returns the name of a named kind ("area", "density", …), or the
-// exponent form of an unnamed one ("L⁻¹", "L²·M"). It never panics and never
+// exponent form of an unnamed one ("L⁻¹", "L²·M"). It is display text, never a
+// unit symbol — see [Kind.canonicalSymbol] for that. It never panics and never
 // returns the empty string.
 func (k Kind) String() string {
 	if name, ok := kindNames[k]; ok {
@@ -107,14 +109,7 @@ func (k Kind) String() string {
 	}
 
 	parts := make([]string, 0, 3)
-	for _, d := range []struct {
-		symbol string
-		exp    int8
-	}{
-		{"L", k.l},
-		{"M", k.m},
-		{"A", k.a},
-	} {
+	for _, d := range k.dimensions() {
 		if d.exp != 0 {
 			parts = append(parts, d.symbol+superscript(d.exp))
 		}
@@ -124,6 +119,45 @@ func (k Kind) String() string {
 		return "dimensionless"
 	}
 	return strings.Join(parts, "·")
+}
+
+// canonicalSymbol returns the synthetic unit symbol a value of this kind is
+// carried in when the kind has no registered base unit: an ASCII exponent form
+// in the fixed order length, mass, angle, wrapped in brackets — "[L^-1]",
+// "[L^2*M]". The brackets are a reserved namespace ([Define] rejects a symbol
+// that opens with one), so a synthetic symbol can never be confused with, or
+// hijacked by, a real unit. It is never the kind's display name: a unit symbol
+// is a key, not prose.
+func (k Kind) canonicalSymbol() string {
+	parts := make([]string, 0, 3)
+	for _, d := range k.dimensions() {
+		switch d.exp {
+		case 0:
+		case 1:
+			parts = append(parts, d.symbol)
+		default:
+			parts = append(parts, d.symbol+"^"+strconv.Itoa(int(d.exp)))
+		}
+	}
+	if len(parts) == 0 {
+		// Unreachable: the all-zero kind is Dimensionless, which has a base unit.
+		return "[1]"
+	}
+	return "[" + strings.Join(parts, "*") + "]"
+}
+
+// dimension is one base dimension of a kind: its symbol and this kind's exponent
+// of it.
+type dimension struct {
+	symbol string
+	exp    int8
+}
+
+// dimensions returns k's exponents in the fixed order length, mass, angle. Both
+// the display form and the canonical symbol iterate it, so the two never drift
+// apart in ordering.
+func (k Kind) dimensions() [3]dimension {
+	return [3]dimension{{"L", k.l}, {"M", k.m}, {"A", k.a}}
 }
 
 // clampExp narrows a computed exponent to the int8 range that a [Kind] stores.
@@ -137,6 +171,22 @@ func clampExp(x int64) int8 {
 		return math.MinInt8
 	}
 	return int8(x)
+}
+
+// scaleExp multiplies an exponent by n and clamps the product to the int8 range.
+// n is narrowed to that range first: an int is 64 bits wide, so the product of a
+// raw n and an exponent would overflow int64 and wrap — turning an absurd power
+// into a plausible-looking kind — before clampExp ever saw it. Narrowing first
+// preserves the sign, so a huge n still saturates to the endpoint it points at,
+// and bounds the product by 127*128.
+func scaleExp(e int8, n int) int8 {
+	switch {
+	case n > math.MaxInt8:
+		n = math.MaxInt8
+	case n < math.MinInt8:
+		n = math.MinInt8
+	}
+	return clampExp(int64(e) * int64(n))
 }
 
 // superDigits maps a decimal digit to its Unicode superscript.

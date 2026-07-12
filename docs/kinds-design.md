@@ -118,7 +118,14 @@ func (v Value) Div(o Value) (Value, error)
 enumerating that length times length is an area.
 
 `Add`/`Sub` still require equal kinds (plus the angle/dimensionless carve-out).
-Division by a zero-magnitude value is `ErrDivideByZero`, not `+Inf`.
+`Value.Div` yields a **finite** quotient or an error: a zero base magnitude in
+the divisor is `ErrDivideByZero`, and so is a divisor small enough to blow the
+quotient up to `±Inf` or `NaN`.
+
+Exponents **saturate**, never wrap. `Pow` narrows its multiplier into the `int8`
+range before scaling, so even `Area.Pow(math.MinInt64)` lands on an endpoint of
+the right sign rather than wrapping into a plausible-looking named kind. An
+out-of-range composition is a programming error, and it must look like one.
 
 ## 5. Units for derived kinds
 
@@ -127,24 +134,53 @@ need base units and a starter set:
 
 | Kind | Base | Built-ins |
 |---|---|---|
+| Dimensionless | (none) | — |
 | Length | mm | mm, cm, m, in, ft, thou |
 | Area | mm² | mm², cm², m², in² |
 | Volume | mm³ | mm³, cm³ (= mL), m³, in³, L |
 | Mass | kg | kg, g, lb |
 | Density | kg/mm³ | kg/m³, g/cm³ |
+| MomentOfInertia | kg*mm^2 | — |
+| SecondMomentOfArea | mm^4 | — |
 | Angle | rad | rad, deg |
 
-`BaseUnit(k)` becomes a lookup rather than a switch, and returns `(Unit, bool)` —
-an unnamed kind like `L⁻¹` has no base unit registered, and fabricating one would
-be a lie. **This is a signature change** (today it returns a bare `Unit`), and it
-is the honest one: the function now has an answer it cannot always give.
+**Every named kind has a registered base unit.** `BaseUnit(k)` is a lookup rather
+than a switch, and returns `(Unit, bool)` — an unnamed kind like `L⁻¹` has no
+base unit registered, and fabricating one would be a lie. **This is a signature
+change** (today it returns a bare `Unit`), and it is the honest one: the function
+now has an answer it cannot always give.
+
+Unit symbols are ASCII, with a caret for an exponent. `Kind.String()` — Unicode
+superscripts, `L⁻¹`, and English names for named kinds — is **display text and
+never a unit symbol**.
+
+### Synthetic units for unnamed kinds
+
+`Value.Mul`/`Value.Div` must carry their result somewhere, so a result of an
+unnamed kind gets a **synthetic** unit of factor 1, whose symbol is that kind's
+canonical form: ASCII, exponents in the fixed order length, mass, angle, wrapped
+in brackets — `[L^-1]`, `[L^2*M]`. Two rules keep it honest:
+
+- The synthetic unit is **not** in the registry: `Lookup` does not find it and
+  `BaseUnit` still reports the kind as having none.
+- The bracketed namespace is **reserved**. `Define` panics on any symbol opening
+  with `[`, so an application cannot register a unit that a persisted synthetic
+  symbol would later resolve to — which would deserialize a value as a *different
+  kind*.
+
+**A value of an unnamed kind is a transient intermediate and MUST NOT be
+persisted.** Compose it back into a named kind first. Every kind a consumer
+actually measures — length, area, volume, mass, density, moment of inertia,
+second moment of area — is named and has a registered base unit, so this bites
+only genuine intermediates such as `L⁻¹`.
 
 ## 6. What this breaks
 
 Almost nothing, because of one lucky fact: **`Kind` is never serialized.** JSON
 stores the unit *symbol* (`"mm"`) and re-derives the kind through `Lookup`, so
 changing `Kind`'s underlying type from `int` to a struct changes **no wire
-format** and no persisted document.
+format** and no persisted document. That is also why only a value of a *named*
+kind is persistable: a synthetic `[L^-1]` symbol has nothing to re-derive from.
 
 The compile-time breakage is small and mechanical:
 

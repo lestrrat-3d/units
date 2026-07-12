@@ -34,16 +34,27 @@
 //	l, _ := units.Liters(1).Div(units.SquareMeters(1))     // a Length
 //
 // The named kinds are [Dimensionless], [Length], [Area], [Volume], [Angle],
-// [Mass], [Density], [MomentOfInertia] and [SecondMomentOfArea]. A kind need
-// not be named to be usable: dividing a dimensionless value by a length yields
-// an inverse length, which compares and prints ("L⁻¹") like any other kind,
-// though [BaseUnit] reports that no base unit is registered for it.
+// [Mass], [Density], [MomentOfInertia] and [SecondMomentOfArea]. Every one of
+// them has a registered base unit. A kind need not be named to be usable:
+// dividing a dimensionless value by a length yields an inverse length, which
+// compares and prints ("L⁻¹") like any other kind, though [BaseUnit] reports
+// that no base unit is registered for it.
 //
 // Base units are the millimetre ([Length]), the square millimetre ([Area]), the
 // cubic millimetre ([Volume]), the kilogram ([Mass]), the kilogram per cubic
-// millimetre ([Density]) and the radian ([Angle]); every unit stores its
-// conversion factor to its kind's base. Unit symbols are ASCII and write an
-// exponent with a caret: "mm^2", "in^3", "kg/m^3".
+// millimetre ([Density]), the kilogram square millimetre ([MomentOfInertia]),
+// the quartic millimetre ([SecondMomentOfArea]) and the radian ([Angle]); every
+// unit stores its conversion factor to its kind's base. Unit symbols are ASCII
+// and write an exponent with a caret: "mm^2", "in^3", "kg/m^3".
+//
+// # Unnamed kinds are transient
+//
+// A [Value] of an unnamed kind carries a synthetic, unregistered unit whose
+// symbol is bracketed ("[L^-1]"): [Lookup] does not resolve it, and [Define]
+// panics on any symbol opening with "[", so the bracketed namespace stays the
+// library's. Such a value is a transient intermediate and MUST NOT be persisted;
+// compose it back into a named kind — every kind an application actually
+// measures has one — before writing it anywhere.
 //
 // An angle is a dimension of its own even though a radian is physically a ratio
 // of two lengths, so that a bare number can never be mistaken for an angle. The

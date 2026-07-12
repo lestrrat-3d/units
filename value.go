@@ -11,8 +11,9 @@ import (
 // (for example adding a length to an angle).
 var ErrIncompatible = errors.New("units: incompatible kinds")
 
-// ErrDivideByZero is returned by [Value.Div] when the divisor's magnitude is
-// zero; the quotient is an error rather than an infinity.
+// ErrDivideByZero is returned by [Value.Div] when the divisor's base magnitude
+// is zero, or when the quotient is not finite. [Value.Div] yields a finite
+// quotient or an error, never an infinity or a NaN.
 var ErrDivideByZero = errors.New("units: division by zero")
 
 // Value is a magnitude paired with the [Unit] it is expressed in. The zero
@@ -55,6 +56,9 @@ func Liters(x float64) Value           { return Value{x, Liter} }
 func Kilograms(x float64) Value { return Value{x, Kilogram} }
 func Grams(x float64) Value     { return Value{x, Gram} }
 func Pounds(x float64) Value    { return Value{x, Pound} }
+
+func KilogramSquareMillimeters(x float64) Value { return Value{x, KilogramSquareMillimeter} }
+func QuarticMillimeters(x float64) Value        { return Value{x, QuarticMillimeter} }
 
 func KilogramsPerCubicMillimeter(x float64) Value { return Value{x, KilogramPerCubicMillimeter} }
 func KilogramsPerCubicMeter(x float64) Value      { return Value{x, KilogramPerCubicMeter} }
@@ -134,14 +138,15 @@ func (v Value) Mul(o Value) (Value, error) {
 
 // Div returns v ÷ o: the magnitudes divided in base units, and the kinds
 // composed. Volume divided by Area is a [Length]. The result is carried in the
-// base unit of the resulting kind. Dividing by a zero magnitude is
-// [ErrDivideByZero], not an infinity.
+// base unit of the resulting kind. The quotient is always finite: a zero base
+// magnitude in the divisor is [ErrDivideByZero], and so is a divisor so small
+// that the quotient would be an infinity or a NaN.
 func (v Value) Div(o Value) (Value, error) {
-	if o.Base() == 0 {
+	q := v.Base() / o.Base()
+	if o.Base() == 0 || math.IsInf(q, 0) || math.IsNaN(q) {
 		return Value{}, fmt.Errorf("%w: cannot divide %s by %s", ErrDivideByZero, v, o)
 	}
-	u := baseUnitFor(v.unit.kind.Div(o.unit.kind))
-	return Value{v.Base() / o.Base(), u}, nil
+	return Value{q, baseUnitFor(v.unit.kind.Div(o.unit.kind))}, nil
 }
 
 // Scale returns v multiplied by a dimensionless factor.
