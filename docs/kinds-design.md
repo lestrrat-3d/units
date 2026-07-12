@@ -79,7 +79,9 @@ stated, tested, and confined to `Add`/`Sub`.
 
 ## 3. The named kinds
 
-Constants, so nobody writes `Kind{l: 3}` by hand:
+Package-level `var`s — a struct cannot be a Go `const` — so nobody writes
+`Kind{l: 3}` by hand. They are read-only by contract: **never reassign one.**
+Rebinding `Length` would change what every value in the process measures.
 
 ```go
 var (
@@ -118,9 +120,23 @@ func (v Value) Div(o Value) (Value, error)
 enumerating that length times length is an area.
 
 `Add`/`Sub` still require equal kinds (plus the angle/dimensionless carve-out).
-`Value.Div` yields a **finite** quotient or an error: a zero base magnitude in
-the divisor is `ErrDivideByZero`, and so is a divisor small enough to blow the
-quotient up to `±Inf` or `NaN`.
+
+### The result is finite, or it is an error
+
+`Value.Mul` and `Value.Div` both yield a **finite** magnitude or an error — never
+an `±Inf`, never a `NaN`:
+
+- A zero base magnitude in the divisor is `ErrDivideByZero`.
+- A product or quotient that overflows to an infinity, or that is a `NaN`
+  (`Inf × 0`), is `ErrNotFinite`. Two sentinels, so the error says which thing
+  actually happened.
+
+This is not fastidiousness. A result of a *named* kind carries a **registered**
+symbol, so `+Inf mm^2` serializes exactly like a real area and nothing downstream
+can tell it apart — an infinity that escaped with a nil error is a poisoned
+document. The same reason a unit's factor must be positive and finite: `Define`
+panics on a zero, negative, infinite or `NaN` factor, because every magnitude
+expressed in such a unit would convert back to an infinity or a `NaN`.
 
 Exponents **saturate**, never wrap. `Pow` narrows its multiplier into the `int8`
 range before scaling, so even `Area.Pow(math.MinInt64)` lands on an endpoint of
@@ -134,7 +150,7 @@ need base units and a starter set:
 
 | Kind | Base | Built-ins |
 |---|---|---|
-| Dimensionless | (none) | — |
+| Dimensionless | `One` (the empty symbol) | — |
 | Length | mm | mm, cm, m, in, ft, thou |
 | Area | mm² | mm², cm², m², in² |
 | Volume | mm³ | mm³, cm³ (= mL), m³, in³, L |
@@ -146,13 +162,28 @@ need base units and a starter set:
 
 **Every named kind has a registered base unit.** `BaseUnit(k)` is a lookup rather
 than a switch, and returns `(Unit, bool)` — an unnamed kind like `L⁻¹` has no
-base unit registered, and fabricating one would be a lie. **This is a signature
-change** (today it returns a bare `Unit`), and it is the honest one: the function
-now has an answer it cannot always give.
+base unit registered, and fabricating one would be a lie. The `bool` is the
+honest part: the function has an answer it cannot always give.
 
 Unit symbols are ASCII, with a caret for an exponent. `Kind.String()` — Unicode
 superscripts, `L⁻¹`, and English names for named kinds — is **display text and
 never a unit symbol**.
+
+The registry behind `Define`/`Lookup` is guarded by a `sync.RWMutex`: an
+application may register its own units from any goroutine while others resolve
+symbols.
+
+### A presentation unit never changes the kind
+
+`System.UnitFor(k)` returns a unit that measures `k` — always. For a length or an
+angle it is the system's configured unit, for any other named kind that kind's
+base unit, and for an unnamed kind the **synthetic factor-1 unit of that kind**.
+It never falls back to `One`, which would be `Dimensionless`: routing a curvature
+through a dimensionless "default" would rebuild it as a bare number, and `Add`'s
+angle/dimensionless carve-out would then let it be added to an angle. A silent
+cross-kind coercion, with a nil error the whole way, is precisely what this
+library exists to prevent — so `Display` and `In` are kind-preserving by
+construction, not by luck.
 
 ### Synthetic units for unnamed kinds
 

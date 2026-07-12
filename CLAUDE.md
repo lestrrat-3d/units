@@ -25,12 +25,21 @@ It is a **foundation module**: consumed by `github.com/lestrrat-3d/sketch` and
 - **NEVER coerce across kinds.** A length is not an angle. Converting between
   kinds returns an `error`; it is never a silent reinterpretation. `Angle` is a
   dimension of its own, never unified with `Dimensionless`; the sole carve-out
-  is `Add`/`Sub` between an angle and a dimensionless value.
+  is `Add`/`Sub` between an angle and a dimensionless value. That includes
+  presentation: `System.UnitFor(k)` returns a unit **of kind `k`**, falling back
+  to the kind's synthetic factor-1 unit rather than to `One`.
+- **NEVER let a non-finite magnitude escape.** `Mul` and `Div` return a finite
+  result or an error (`ErrDivideByZero`, `ErrNotFinite`) — never `+Inf`, never
+  `NaN`. A result of a named kind carries a registered symbol, so an infinity
+  would persist as if it were a real quantity. Likewise a unit's factor: `Define`
+  panics on a zero, negative, infinite or NaN factor.
 - **NEVER accept a unit as a bare string** in the value-building API. Units are
   typed constants. `Lookup` exists for deserialization only.
 - **NEVER return a naked `float64`** for a quantity that has a unit. That is the
   bug this library exists to prevent.
-- **A `Value` is immutable.** Operations return a new `Value`.
+- **A `Value` is immutable.** Operations return a new `Value`. The zero `Value`
+  is 0 of `One`: the zero `Unit` is read as `One`, so a `var`-declared `Value`
+  behaves as a plain 0 in every operation.
 - **NEVER persist a value of an unnamed kind.** It carries a synthetic,
   unregistered unit (`[L^-1]`) that `Lookup` cannot resolve; it is a transient
   intermediate. Every named kind has a registered base unit — convert first.
@@ -40,7 +49,7 @@ It is a **foundation module**: consumed by `github.com/lestrrat-3d/sketch` and
 | Path | Responsibility |
 |---|---|
 | `kind.go` | `Kind` — dimension exponents, the named kinds, `Mul`/`Div`/`Pow`, `String`. |
-| `unit.go` | `Unit`, the built-in unit set, `BaseUnit`, `Define`, `Lookup`, the registry. |
+| `unit.go` | `Unit`, the built-in unit set, `BaseUnit`, `Define`, `Lookup`, the mutex-guarded registry. |
 | `value.go` | `Value` — magnitude + unit, conversion, arithmetic, formatting. |
 | `system.go` | `System` — the current default units, for presenting base-unit quantities. |
 | `doc.go` | Package doc: scope + the no-naked-float rule. |

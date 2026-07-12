@@ -2,6 +2,8 @@ package units_test
 
 import (
 	"math"
+	"strconv"
+	"sync"
 	"testing"
 	"unicode/utf8"
 
@@ -265,17 +267,183 @@ func TestDivideByZero(t *testing.T) {
 	require.ErrorIs(t, err, units.ErrDivideByZero, "a divisor that underflows to a zero base")
 
 	// A subnormal divisor does not underflow, but blows the quotient up to +Inf.
-	// The contract is a finite quotient or an error, never an infinity.
+	// The contract is a finite quotient or an error, never an infinity — and the
+	// error says what actually happened, which is an overflow, not a zero divisor.
 	_, err = units.Millimeters(1).Div(units.Kilograms(5e-324))
-	require.ErrorIs(t, err, units.ErrDivideByZero, "a divisor that overflows the quotient")
+	require.ErrorIs(t, err, units.ErrNotFinite, "a divisor that overflows the quotient")
+	require.NotErrorIs(t, err, units.ErrDivideByZero, "the divisor is not zero")
 
 	_, err = units.Millimeters(-1).Div(units.Kilograms(5e-324))
-	require.ErrorIs(t, err, units.ErrDivideByZero, "…and in the negative direction")
+	require.ErrorIs(t, err, units.ErrNotFinite, "…and in the negative direction")
 
 	// The finite quotients around it still divide.
 	q, err := units.Millimeters(1).Div(units.Kilograms(2))
 	require.NoError(t, err)
 	require.InDelta(t, 0.5, q.Base(), 1e-9)
+}
+
+func TestMulNotFinite(t *testing.T) {
+	// A product is finite or it is an error. A non-finite magnitude would carry a
+	// registered symbol ("+Inf mm^2"), so — unlike a synthetic unit — it would be
+	// perfectly persistable, and nothing downstream would ever know.
+	for _, tc := range []struct {
+		name string
+		mul  func() (units.Value, error)
+	}{
+		{"overflow to +Inf", func() (units.Value, error) { return units.Meters(1e200).Mul(units.Meters(1e200)) }},
+		{"overflow to -Inf", func() (units.Value, error) { return units.Meters(-1e200).Mul(units.Meters(1e200)) }},
+		{"both negative", func() (units.Value, error) { return units.Meters(-1e200).Mul(units.Meters(-1e200)) }},
+		{"an area squared", func() (units.Value, error) {
+			return units.SquareMillimeters(1e300).Mul(units.SquareMillimeters(1e300))
+		}},
+		{"NaN from Inf x 0", func() (units.Value, error) {
+			return units.Scalar(math.Inf(1)).Mul(units.Scalar(0))
+		}},
+		{"NaN from -Inf x 0", func() (units.Value, error) {
+			return units.Millimeters(math.Inf(-1)).Mul(units.Scalar(0))
+		}},
+		{"a NaN operand", func() (units.Value, error) {
+			return units.Millimeters(math.NaN()).Mul(units.Millimeters(2))
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			v, err := tc.mul()
+			require.ErrorIs(t, err, units.ErrNotFinite)
+			require.Equal(t, units.Value{}, v, "no value escapes with the error")
+		})
+	}
+
+	// The finite products around them still multiply.
+	a, err := units.Meters(1e150).Mul(units.Meters(1e150))
+	require.NoError(t, err)
+	require.Equal(t, units.Area, a.Kind())
+	require.False(t, math.IsInf(a.Base(), 0), "a finite product stays finite")
+}
+
+func TestZeroValue(t *testing.T) {
+	// The zero Value is 0 of One: its unit's factor is 1, not 0, so it does not
+	// blow every arithmetic it takes part in up to an infinity.
+	var v units.Value
+	require.Equal(t, units.One, v.Unit(), "the zero Value carries One")
+	require.Equal(t, units.Dimensionless, v.Kind())
+	require.InDelta(t, 1, v.Unit().Factor(), 0, "the zero Value's unit has factor 1")
+	require.InDelta(t, 0, v.Mag(), 0)
+	require.InDelta(t, 0, v.Base(), 0)
+	require.Equal(t, "0", v.String())
+
+	sum, err := v.Add(units.Scalar(5))
+	require.NoError(t, err)
+	require.InDelta(t, 5, sum.Base(), 1e-12, "0 + 5 is 5, not +Inf")
+	require.Equal(t, units.Dimensionless, sum.Kind())
+
+	sum, err = units.Scalar(5).Add(v)
+	require.NoError(t, err)
+	require.InDelta(t, 5, sum.Base(), 1e-12)
+
+	diff, err := v.Sub(units.Scalar(5))
+	require.NoError(t, err)
+	require.InDelta(t, -5, diff.Base(), 1e-12)
+
+	// It scales, converts and compares like any other dimensionless value.
+	require.InDelta(t, 0, v.Scale(3).Base(), 0)
+	require.InDelta(t, 0, v.Neg().Base(), 0)
+	require.True(t, v.Equal(units.Scalar(0), 0), "the zero Value equals a zero scalar")
+
+	one, err := v.In(units.One)
+	require.NoError(t, err)
+	require.InDelta(t, 0, one, 0)
+
+	// The angle carve-out reaches it too: 0 + 90deg is 90deg, not +Inf.
+	ang, err := v.Add(units.Degrees(90))
+	require.NoError(t, err)
+	require.Equal(t, units.Angle, ang.Kind())
+	require.InDelta(t, 90, ang.Mag(), 1e-12)
+
+	// It multiplies and divides without fabricating a NaN.
+	p, err := v.Mul(units.Millimeters(3))
+	require.NoError(t, err)
+	require.Equal(t, units.Length, p.Kind())
+	require.InDelta(t, 0, p.Base(), 0)
+
+	q, err := units.Millimeters(3).Div(units.Scalar(2))
+	require.NoError(t, err)
+	require.InDelta(t, 1.5, q.Base(), 1e-12)
+
+	// …and dividing by it is a division by zero, not an infinity.
+	_, err = units.Millimeters(3).Div(v)
+	require.ErrorIs(t, err, units.ErrDivideByZero)
+}
+
+func TestDefineRejectsBadFactor(t *testing.T) {
+	// A unit whose factor is zero, negative or non-finite cannot convert: every
+	// magnitude expressed in it would come back an infinity or a NaN. That is a
+	// programming error, like a duplicate symbol, so Define panics on it.
+	for _, tc := range []struct {
+		name   string
+		symbol string
+		factor float64
+	}{
+		{"zero", "zz-zero", 0},
+		{"negative", "zz-neg", -1},
+		{"+Inf", "zz-inf", math.Inf(1)},
+		{"-Inf", "zz-neginf", math.Inf(-1)},
+		{"NaN", "zz-nan", math.NaN()},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			require.Panics(t, func() { units.Define(tc.symbol, units.Length, tc.factor) })
+			_, ok := units.Lookup(tc.symbol)
+			require.False(t, ok, "a rejected unit must not be registered")
+		})
+	}
+
+	// A positive, finite factor is fine, however small or large.
+	u := units.Define("zz-ok", units.Length, 1e-9)
+	require.InDelta(t, 1e-9, u.Factor(), 0)
+}
+
+func TestRegistryConcurrent(t *testing.T) {
+	// Define writes the registry that Lookup and BaseUnit read. An application may
+	// register its units from one goroutine while another deserializes symbols, so
+	// the registry is guarded; run under -race, this is the proof.
+	const n = 64
+
+	// Assertions belong to the test goroutine, so the readers report what they saw
+	// rather than failing from a goroutine of their own.
+	seen := make(chan units.Unit, 2*n)
+
+	var wg sync.WaitGroup
+	for i := range n {
+		wg.Add(3)
+
+		go func() {
+			defer wg.Done()
+			units.Define("zz-race-"+strconv.Itoa(i), units.Length, float64(i)+1)
+		}()
+		go func() {
+			defer wg.Done()
+			u, _ := units.Lookup("mm")
+			units.Lookup("zz-race-" + strconv.Itoa(i)) // may or may not be defined yet
+			seen <- u
+		}()
+		go func() {
+			defer wg.Done()
+			u, _ := units.BaseUnit(units.Area)
+			seen <- u
+		}()
+	}
+	wg.Wait()
+	close(seen)
+
+	for u := range seen {
+		require.Contains(t, []units.Unit{units.Millimeter, units.SquareMillimeter}, u,
+			"a concurrent reader never sees a torn or missing built-in")
+	}
+
+	for i := range n {
+		u, ok := units.Lookup("zz-race-" + strconv.Itoa(i))
+		require.True(t, ok, "every concurrently defined unit is registered")
+		require.InDelta(t, float64(i)+1, u.Factor(), 0)
+	}
 }
 
 func TestNamedKindsHaveBaseUnits(t *testing.T) {
@@ -441,10 +609,53 @@ func TestSystemDerivedKinds(t *testing.T) {
 	m := units.Metric()
 	require.Equal(t, units.SquareMillimeter, m.UnitFor(units.Area))
 	require.Equal(t, units.Kilogram, m.UnitFor(units.Mass))
-	require.Equal(t, units.One, m.UnitFor(units.Dimensionless.Div(units.Length)), "an unnamed kind has no default unit")
+
+	// An unnamed kind has no registered base unit, but its presentation unit
+	// still measures that kind: a default unit is never a different kind.
+	curvature := units.Dimensionless.Div(units.Length)
+	u := m.UnitFor(curvature)
+	require.Equal(t, curvature, u.Kind(), "UnitFor preserves the kind of an unnamed kind")
+	require.InDelta(t, 1, u.Factor(), 0, "the synthetic presentation unit has factor 1")
+	require.Equal(t, "[L^-1]", u.Symbol())
 
 	area, err := units.Meters(1).Mul(units.Meters(1))
 	require.NoError(t, err)
 	require.InDelta(t, 1e6, m.In(area), 1e-6, "1 m^2 displayed in mm^2")
 	require.Equal(t, units.SquareMillimeter, m.Display(area).Unit())
+}
+
+func TestSystemNeverCoercesKind(t *testing.T) {
+	// Routing a value through the system's default unit must not change what it
+	// measures. If UnitFor handed back a unit of another kind, a curvature could
+	// be rebuilt as a dimensionless value — and then added to an angle, because
+	// Add carves out angle + dimensionless. A curvature would silently become an
+	// angle, with a nil error the whole way.
+	sys := units.Metric()
+
+	curvature, err := units.Scalar(1).Div(units.Millimeters(4))
+	require.NoError(t, err)
+	require.Equal(t, units.Dimensionless.Div(units.Length), curvature.Kind())
+
+	round := units.New(curvature.Mag(), sys.UnitFor(curvature.Kind()))
+	require.Equal(t, curvature.Kind(), round.Kind(), "a round trip through UnitFor keeps the kind")
+	require.InDelta(t, curvature.Base(), round.Base(), 1e-12, "…and the quantity")
+
+	_, err = round.Add(units.Degrees(90))
+	require.ErrorIs(t, err, units.ErrIncompatible, "a curvature is not an angle")
+
+	// Display and In are correct by construction, not by luck.
+	require.Equal(t, curvature.Kind(), sys.Display(curvature).Kind())
+	require.InDelta(t, 0.25, sys.In(curvature), 1e-12)
+
+	for _, k := range []units.Kind{
+		units.Dimensionless.Div(units.Length),
+		units.Mass.Div(units.Area),
+		units.Length.Div(units.Angle),
+		units.Length.Pow(5),
+		units.Area, units.Volume, units.Mass, units.Length, units.Angle, units.Dimensionless,
+	} {
+		t.Run(k.String(), func(t *testing.T) {
+			require.Equal(t, k, sys.UnitFor(k).Kind(), "a default unit always measures the kind asked for")
+		})
+	}
 }

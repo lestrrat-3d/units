@@ -12,7 +12,12 @@
 //	fmt.Println(w)            // "100 mm"
 //
 // A [System] records the current default length and angle units, used for
-// presenting base-unit quantities back in a chosen unit.
+// presenting base-unit quantities back in a chosen unit. Its default unit for a
+// kind always measures that kind, so presenting a value never changes what it
+// measures.
+//
+// The zero [Value] is 0 of the dimensionless unit [One], and arithmetic on it
+// behaves accordingly.
 //
 // # Scope
 //
@@ -32,6 +37,11 @@
 //
 //	a, _ := units.Millimeters(2).Mul(units.Millimeters(3)) // 6 mm², an Area
 //	l, _ := units.Liters(1).Div(units.SquareMeters(1))     // a Length
+//
+// [Value.Mul] and [Value.Div] yield a finite result or an error, never an
+// infinity and never a NaN: a zero base magnitude in a divisor is
+// [ErrDivideByZero], and a product or quotient that overflows or is a NaN is
+// [ErrNotFinite].
 //
 // The named kinds are [Dimensionless], [Length], [Area], [Volume], [Angle],
 // [Mass], [Density], [MomentOfInertia] and [SecondMomentOfArea]. Every one of
@@ -60,4 +70,11 @@
 // of two lengths, so that a bare number can never be mistaken for an angle. The
 // single carve-out is that [Value.Add] and [Value.Sub] accept an angle and a
 // dimensionless value together, because theta + pi/2 is an angle.
+//
+// # Extending the unit set
+//
+// [Define] registers a new unit against a kind. A symbol may not be redefined,
+// symbols opening with "[" are reserved, and a unit's factor to its base must be
+// positive and finite; each of those is a panic. The registry is guarded, so
+// [Define], [Lookup] and [BaseUnit] may be called from multiple goroutines.
 package units

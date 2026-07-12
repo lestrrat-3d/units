@@ -19,8 +19,11 @@ func Imperial() System { return System{Length: Inch, Angle: Degree} }
 
 // UnitFor returns the system's default unit for a kind: the configured length
 // or angle unit, and for any other kind its base unit — square millimetres for
-// an area, kilograms for a mass. A kind with no base unit ([BaseUnit] reports
-// false for it) has no presentation unit either, and yields [One].
+// an area, kilograms for a mass. The returned unit always measures k: a kind
+// with no registered base unit ([BaseUnit] reports false for it) yields the
+// synthetic factor-1 unit of that kind, never a unit of some other kind. A
+// presentation unit that changed the kind would be the coercion this library
+// exists to prevent.
 func (s System) UnitFor(k Kind) Unit {
 	switch k {
 	case Length:
@@ -31,7 +34,7 @@ func (s System) UnitFor(k Kind) Unit {
 		if u, ok := BaseUnit(k); ok {
 			return u
 		}
-		return One
+		return baseUnitFor(k)
 	}
 }
 

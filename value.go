@@ -12,12 +12,19 @@ import (
 var ErrIncompatible = errors.New("units: incompatible kinds")
 
 // ErrDivideByZero is returned by [Value.Div] when the divisor's base magnitude
-// is zero, or when the quotient is not finite. [Value.Div] yields a finite
-// quotient or an error, never an infinity or a NaN.
+// is zero.
 var ErrDivideByZero = errors.New("units: division by zero")
 
+// ErrNotFinite is returned by [Value.Mul] and [Value.Div] when the result is not
+// finite: a product or quotient that overflows to an infinity, or one — Inf × 0,
+// say — that is a NaN. Both operations yield a finite result or an error, never
+// an infinity and never a NaN, because a non-finite magnitude carries a
+// registered symbol and so would persist as if it were a real quantity.
+var ErrNotFinite = errors.New("units: result is not finite")
+
 // Value is a magnitude paired with the [Unit] it is expressed in. The zero
-// Value is 0 of the dimensionless unit [One].
+// Value is 0 of the dimensionless unit [One]: the zero [Unit] is read as One, so
+// a Value declared with var behaves as a plain 0 in every operation.
 type Value struct {
 	mag  float64
 	unit Unit
@@ -28,7 +35,10 @@ func New(mag float64, u Unit) Value { return Value{mag: mag, unit: u} }
 
 // FromBase returns a Value equal to base (expressed in u's base unit), but
 // carried in unit u. For example FromBase(1000, Meter) is 1 m.
-func FromBase(base float64, u Unit) Value { return Value{mag: base / u.factor, unit: u} }
+func FromBase(base float64, u Unit) Value {
+	u = u.normalize()
+	return Value{mag: base / u.factor, unit: u}
+}
 
 // Millimeters, and the constructors below it, build a Value of x in each of the
 // built-in units.
@@ -67,15 +77,15 @@ func GramsPerCubicCentimeter(x float64) Value     { return Value{x, GramPerCubic
 // Mag returns the magnitude in the value's own unit.
 func (v Value) Mag() float64 { return v.mag }
 
-// Unit returns the value's unit.
-func (v Value) Unit() Unit { return v.unit }
+// Unit returns the value's unit; for the zero Value that is [One].
+func (v Value) Unit() Unit { return v.unit.normalize() }
 
 // Kind returns the kind of quantity the value measures.
 func (v Value) Kind() Kind { return v.unit.kind }
 
 // Base returns the magnitude expressed in the kind's base unit (mm for a
 // length, mm² for an area, rad for an angle).
-func (v Value) Base() float64 { return v.mag * v.unit.factor }
+func (v Value) Base() float64 { return v.mag * v.Unit().factor }
 
 // In returns the magnitude expressed in unit u, or [ErrIncompatible] if u
 // measures a different kind.
@@ -83,7 +93,7 @@ func (v Value) In(u Unit) (float64, error) {
 	if v.unit.kind != u.kind {
 		return 0, fmt.Errorf("%w: cannot express %s in %s", ErrIncompatible, v.unit.kind, u.kind)
 	}
-	return v.mag * v.unit.factor / u.factor, nil
+	return v.Base() / u.Factor(), nil
 }
 
 // Convert returns the same quantity carried in unit u.
@@ -92,7 +102,7 @@ func (v Value) Convert(u Unit) (Value, error) {
 	if err != nil {
 		return Value{}, err
 	}
-	return Value{m, u}, nil
+	return Value{m, u.normalize()}, nil
 }
 
 // Add returns v + o. The operands must be the same kind, with one carve-out: an
@@ -107,14 +117,15 @@ func (v Value) Sub(o Value) (Value, error) { return v.combine(o, -1) }
 
 // combine adds sign*o to v.
 func (v Value) combine(o Value, sign float64) (Value, error) {
-	if v.unit.kind == o.unit.kind {
-		return Value{v.mag + sign*o.mag*o.unit.factor/v.unit.factor, v.unit}, nil
+	vu, ou := v.Unit(), o.Unit()
+	if vu.kind == ou.kind {
+		return Value{v.mag + sign*o.mag*ou.factor/vu.factor, vu}, nil
 	}
 
-	if isAngleScalarPair(v.unit.kind, o.unit.kind) {
-		u := v.unit
-		if v.unit.kind == Dimensionless {
-			u = o.unit
+	if isAngleScalarPair(vu.kind, ou.kind) {
+		u := vu
+		if vu.kind == Dimensionless {
+			u = ou
 		}
 		return FromBase(v.Base()+sign*o.Base(), u), nil
 	}
@@ -131,23 +142,37 @@ func isAngleScalarPair(a, b Kind) bool {
 // Mul returns v × o: the magnitudes multiplied in base units, and the kinds
 // composed. Millimeters(2).Mul(Millimeters(3)) is 6 mm², an [Area]. The result
 // is carried in the base unit of the resulting kind.
+//
+// The product is always finite: operands large enough to overflow it to an
+// infinity, or to make it a NaN, are [ErrNotFinite].
 func (v Value) Mul(o Value) (Value, error) {
-	u := baseUnitFor(v.unit.kind.Mul(o.unit.kind))
-	return Value{v.Base() * o.Base(), u}, nil
+	p := v.Base() * o.Base()
+	if !isFinite(p) {
+		return Value{}, fmt.Errorf("%w: cannot multiply %s by %s", ErrNotFinite, v, o)
+	}
+	return Value{p, baseUnitFor(v.unit.kind.Mul(o.unit.kind))}, nil
 }
 
 // Div returns v ÷ o: the magnitudes divided in base units, and the kinds
 // composed. Volume divided by Area is a [Length]. The result is carried in the
-// base unit of the resulting kind. The quotient is always finite: a zero base
-// magnitude in the divisor is [ErrDivideByZero], and so is a divisor so small
-// that the quotient would be an infinity or a NaN.
+// base unit of the resulting kind.
+//
+// The quotient is always finite: a zero base magnitude in the divisor is
+// [ErrDivideByZero], and a divisor small enough — or a dividend large enough —
+// to blow the quotient up to an infinity or a NaN is [ErrNotFinite].
 func (v Value) Div(o Value) (Value, error) {
-	q := v.Base() / o.Base()
-	if o.Base() == 0 || math.IsInf(q, 0) || math.IsNaN(q) {
+	if o.Base() == 0 {
 		return Value{}, fmt.Errorf("%w: cannot divide %s by %s", ErrDivideByZero, v, o)
+	}
+	q := v.Base() / o.Base()
+	if !isFinite(q) {
+		return Value{}, fmt.Errorf("%w: cannot divide %s by %s", ErrNotFinite, v, o)
 	}
 	return Value{q, baseUnitFor(v.unit.kind.Div(o.unit.kind))}, nil
 }
+
+// isFinite reports whether x is a real number: neither an infinity nor a NaN.
+func isFinite(x float64) bool { return !math.IsInf(x, 0) && !math.IsNaN(x) }
 
 // Scale returns v multiplied by a dimensionless factor.
 func (v Value) Scale(f float64) Value { return Value{v.mag * f, v.unit} }
@@ -171,5 +196,5 @@ func (v Value) String() string {
 	if v.unit.kind == Dimensionless {
 		return n
 	}
-	return n + " " + v.unit.symbol
+	return n + " " + v.Unit().symbol
 }

@@ -4,6 +4,7 @@ import (
 	"math"
 	"strconv"
 	"strings"
+	"sync"
 )
 
 // Unit is a unit of measure. Units are values, compared by identity of their
@@ -15,10 +16,26 @@ import (
 // "mm^2" is the square millimetre, "kg/mm^3" the kilogram per cubic millimetre.
 // A symbol opening with "[" is reserved for the library's synthetic units (see
 // [Define]).
+//
+// Every unit's factor is positive and finite ([Define] rejects anything else),
+// so a conversion through a unit is always well defined. The zero Unit is [One]:
+// its factor field is 0, which is not a usable multiplier, so it is read as the
+// dimensionless factor-1 unit it otherwise already is.
 type Unit struct {
 	symbol string
 	kind   Kind
 	factor float64 // magnitude * factor == magnitude in the kind's base unit
+}
+
+// normalize reads the zero Unit as [One]. Every registered or synthetic unit has
+// a positive, finite factor, so a factor of 0 identifies the zero value and
+// nothing else — and dividing or multiplying by it would turn a quantity into an
+// infinity or a NaN rather than the 0-of-[One] the zero Unit means.
+func (u Unit) normalize() Unit {
+	if u.factor == 0 {
+		return One
+	}
+	return u
 }
 
 // Symbol returns the unit's short symbol (e.g. "mm"); it is empty for the
@@ -29,8 +46,9 @@ func (u Unit) Symbol() string { return u.symbol }
 func (u Unit) Kind() Kind { return u.kind }
 
 // Factor returns the multiplier that converts a magnitude in this unit to the
-// kind's base unit.
-func (u Unit) Factor() float64 { return u.factor }
+// kind's base unit. It is always positive and finite; for the zero Unit it is 1,
+// the factor of [One].
+func (u Unit) Factor() float64 { return u.normalize().factor }
 
 // String returns the unit's symbol, or "(dimensionless)" for [One].
 func (u Unit) String() string {
@@ -96,11 +114,19 @@ var (
 	Degree = define("deg", Angle, math.Pi/180)
 )
 
-// registry maps symbols back to units for serialization and lookup.
-var registry = map[string]Unit{}
+// registry maps symbols back to units for serialization and lookup. It is
+// mutable after init — [Define] adds to it — so registryMu guards every read and
+// write of it: an application may register its units from any goroutine while
+// others look symbols up.
+var (
+	registryMu sync.RWMutex
+	registry   = map[string]Unit{}
+)
 
 // baseUnits maps a kind to its base unit — the one whose factor is 1. Only the
-// named kinds have an entry; a kind produced by composition need not.
+// named kinds have an entry; a kind produced by composition need not. It is
+// written only by defineBase, which runs during package initialization, and is
+// read-only thereafter, so it needs no lock.
 var baseUnits = map[Kind]Unit{}
 
 // BaseUnit returns the base unit registered for a kind (the unit whose factor
@@ -130,6 +156,13 @@ func define(symbol string, kind Kind, factor float64) Unit {
 	if strings.HasPrefix(symbol, "[") {
 		panic("units: unit symbol namespace is reserved: " + strconv.Quote(symbol))
 	}
+	if factor <= 0 || math.IsInf(factor, 0) || math.IsNaN(factor) {
+		panic("units: unit factor must be positive and finite: " + strconv.FormatFloat(factor, 'g', -1, 64))
+	}
+
+	registryMu.Lock()
+	defer registryMu.Unlock()
+
 	if _, dup := registry[symbol]; dup {
 		panic("units: unit symbol already defined: " + strconv.Quote(symbol))
 	}
@@ -157,13 +190,25 @@ func defineBase(symbol string, kind Kind) Unit {
 // That is the namespace of the synthetic units a [Value] of an unnamed kind is
 // carried in ("[L^-1]"). Registering a unit there would let a persisted symbol
 // deserialize as a kind other than the one it was written with.
+//
+// factorToBase must be positive and finite: Define panics on a zero, negative,
+// infinite or NaN factor. Such a unit could not convert — every magnitude
+// expressed in it would come back as an infinity or a NaN — so it, too, is a
+// programming error rather than an exotic unit.
+//
+// Define is safe to call from multiple goroutines, concurrently with [Lookup]
+// and [BaseUnit].
 func Define(symbol string, kind Kind, factorToBase float64) Unit {
 	return define(symbol, kind, factorToBase)
 }
 
 // Lookup returns the unit previously registered for symbol. It is intended for
-// deserialization; prefer the typed [Unit] constants in normal code.
+// deserialization; prefer the typed [Unit] constants in normal code. It is safe
+// to call concurrently with [Define].
 func Lookup(symbol string) (Unit, bool) {
+	registryMu.RLock()
+	defer registryMu.RUnlock()
+
 	u, ok := registry[symbol]
 	return u, ok
 }

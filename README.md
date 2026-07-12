@@ -55,9 +55,17 @@ top of it, and depends only on the standard library.
 - **A value of an unnamed kind is transient.** It carries a synthetic,
   unregistered unit whose symbol is bracketed (`[L^-1]`) — `Lookup` will not
   resolve it, so it must not be persisted. Compose it back into a named kind
-  first.
+  first. It is still that kind everywhere else: a `System`'s default unit for it
+  measures it, so presenting a value never changes what it measures.
+- **A result is finite, or it is an error.** `Mul` and `Div` never hand back an
+  `+Inf` or a `NaN` with a nil error: a zero base magnitude in a divisor is
+  `ErrDivideByZero`, and an overflowing or NaN result is `ErrNotFinite`.
+- **The zero `Value` is 0 of `One`**, so a `Value` declared with `var` behaves as
+  a plain 0 in every operation.
 - **Extensible.** `Define` registers a new unit against a kind; a symbol may not
-  be redefined, and symbols opening with `[` are reserved for the library.
+  be redefined, symbols opening with `[` are reserved for the library, and the
+  factor to the kind's base must be positive and finite. `Define`, `Lookup` and
+  `BaseUnit` are safe to call from multiple goroutines.
 
 ## License
 
