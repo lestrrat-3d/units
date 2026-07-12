@@ -27,12 +27,18 @@ It is a **foundation module**: consumed by `github.com/lestrrat-3d/sketch` and
   dimension of its own, never unified with `Dimensionless`; the sole carve-out
   is `Add`/`Sub` between an angle and a dimensionless value. That includes
   presentation: `System.UnitFor(k)` returns a unit **of kind `k`**, falling back
-  to the kind's synthetic factor-1 unit rather than to `One`.
-- **NEVER let a non-finite magnitude escape.** `Mul` and `Div` return a finite
-  result or an error (`ErrDivideByZero`, `ErrNotFinite`) — never `+Inf`, never
-  `NaN`. A result of a named kind carries a registered symbol, so an infinity
-  would persist as if it were a real quantity. Likewise a unit's factor: `Define`
-  panics on a zero, negative, infinite or NaN factor.
+  to the kind's base unit — or its synthetic factor-1 unit — rather than to
+  `One`. `System` has exported fields and a usable zero value, so `UnitFor`
+  **validates** them: a `Length`/`Angle` field that is unset or holds a unit of
+  another kind is ignored.
+- **NEVER let a non-finite magnitude escape from an operation that can report
+  it.** `Add`, `Sub`, `Mul`, `Div`, `In` and `Convert` return a finite result or
+  an error (`ErrDivideByZero`, `ErrNotFinite`) — never `+Inf`, never `NaN`. A
+  result of a named kind carries a registered symbol, so an infinity would
+  persist as if it were a real quantity. The error-free constructors and
+  operations (`New`, `FromBase`, `Scale`, `Neg`) cannot check, and say so in
+  their docs. Likewise a unit's factor: `Define` panics on a zero, negative,
+  infinite or NaN factor.
 - **NEVER accept a unit as a bare string** in the value-building API. Units are
   typed constants. `Lookup` exists for deserialization only.
 - **NEVER return a naked `float64`** for a quantity that has a unit. That is the

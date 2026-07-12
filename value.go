@@ -15,11 +15,16 @@ var ErrIncompatible = errors.New("units: incompatible kinds")
 // is zero.
 var ErrDivideByZero = errors.New("units: division by zero")
 
-// ErrNotFinite is returned by [Value.Mul] and [Value.Div] when the result is not
-// finite: a product or quotient that overflows to an infinity, or one — Inf × 0,
-// say — that is a NaN. Both operations yield a finite result or an error, never
-// an infinity and never a NaN, because a non-finite magnitude carries a
-// registered symbol and so would persist as if it were a real quantity.
+// ErrNotFinite is returned by [Value.Add], [Value.Sub], [Value.Mul], [Value.Div],
+// [Value.In] and [Value.Convert] when the result is not finite: a sum, product or
+// quotient that overflows to an infinity, or one — Inf × 0, say — that is a NaN.
+// Every one of those operations yields a finite result or an error, never an
+// infinity and never a NaN, because a non-finite magnitude carries a registered
+// symbol and so would persist as if it were a real quantity.
+//
+// The operations that cannot report an error — [New], [FromBase], [Value.Scale]
+// and [Value.Neg] — do not check: a caller that hands them an infinity, or that
+// scales a value up past the float64 range, gets a non-finite Value back.
 var ErrNotFinite = errors.New("units: result is not finite")
 
 // Value is a magnitude paired with the [Unit] it is expressed in. The zero
@@ -30,11 +35,16 @@ type Value struct {
 	unit Unit
 }
 
-// New returns a Value of mag in unit u.
+// New returns a Value of mag in unit u. It reports no error, so it does not
+// check mag: an infinite or NaN mag yields a Value carrying it. The arithmetic
+// that can report an error ([Value.Add], [Value.Sub], [Value.Mul], [Value.Div])
+// refuses to produce one.
 func New(mag float64, u Unit) Value { return Value{mag: mag, unit: u} }
 
 // FromBase returns a Value equal to base (expressed in u's base unit), but
-// carried in unit u. For example FromBase(1000, Meter) is 1 m.
+// carried in unit u. For example FromBase(1000, Meter) is 1 m. Like [New] it
+// reports no error and so does not check base: an infinite or NaN base yields a
+// non-finite Value.
 func FromBase(base float64, u Unit) Value {
 	u = u.normalize()
 	return Value{mag: base / u.factor, unit: u}
@@ -88,15 +98,22 @@ func (v Value) Kind() Kind { return v.unit.kind }
 func (v Value) Base() float64 { return v.mag * v.Unit().factor }
 
 // In returns the magnitude expressed in unit u, or [ErrIncompatible] if u
-// measures a different kind.
+// measures a different kind. A magnitude that is not finite in u — a value built
+// from an infinity, or one whose conversion overflows — is [ErrNotFinite].
 func (v Value) In(u Unit) (float64, error) {
 	if v.unit.kind != u.kind {
 		return 0, fmt.Errorf("%w: cannot express %s in %s", ErrIncompatible, v.unit.kind, u.kind)
 	}
-	return v.Base() / u.Factor(), nil
+	m := v.Base() / u.Factor()
+	if !isFinite(m) {
+		return 0, fmt.Errorf("%w: cannot express %s in %s", ErrNotFinite, v, u)
+	}
+	return m, nil
 }
 
-// Convert returns the same quantity carried in unit u.
+// Convert returns the same quantity carried in unit u, under the same rules as
+// [Value.In]: a different kind is [ErrIncompatible], a non-finite magnitude is
+// [ErrNotFinite].
 func (v Value) Convert(u Unit) (Value, error) {
 	m, err := v.In(u)
 	if err != nil {
@@ -110,27 +127,39 @@ func (v Value) Convert(u Unit) (Value, error) {
 // ratio of two lengths and theta + pi/2 is an angle. The result is expressed in
 // v's unit, or — for that carve-out — in whichever operand's unit is the angle,
 // so the sum is an angle whichever side it appeared on.
+//
+// The sum is always finite: operands large enough to overflow it to an infinity,
+// or to make it a NaN, are [ErrNotFinite].
 func (v Value) Add(o Value) (Value, error) { return v.combine(o, 1) }
 
-// Sub returns v − o, under the same rules as [Value.Add].
+// Sub returns v − o, under the same rules as [Value.Add], including the finite
+// result: a difference that overflows or is a NaN is [ErrNotFinite].
 func (v Value) Sub(o Value) (Value, error) { return v.combine(o, -1) }
 
 // combine adds sign*o to v.
 func (v Value) combine(o Value, sign float64) (Value, error) {
 	vu, ou := v.Unit(), o.Unit()
-	if vu.kind == ou.kind {
-		return Value{v.mag + sign*o.mag*ou.factor/vu.factor, vu}, nil
-	}
 
-	if isAngleScalarPair(vu.kind, ou.kind) {
+	var r Value
+	switch {
+	case vu.kind == ou.kind:
+		// The ratio of the factors first: o's magnitude times o's factor can
+		// overflow on its own, even where the sum itself is representable.
+		r = Value{v.mag + sign*o.mag*(ou.factor/vu.factor), vu}
+	case isAngleScalarPair(vu.kind, ou.kind):
 		u := vu
 		if vu.kind == Dimensionless {
 			u = ou
 		}
-		return FromBase(v.Base()+sign*o.Base(), u), nil
+		r = FromBase(v.Base()+sign*o.Base(), u)
+	default:
+		return Value{}, fmt.Errorf("%w: cannot combine %s with %s", ErrIncompatible, v.unit.kind, o.unit.kind)
 	}
 
-	return Value{}, fmt.Errorf("%w: cannot combine %s with %s", ErrIncompatible, v.unit.kind, o.unit.kind)
+	if !isFinite(r.mag) {
+		return Value{}, fmt.Errorf("%w: cannot combine %s with %s", ErrNotFinite, v, o)
+	}
+	return r, nil
 }
 
 // isAngleScalarPair reports whether a and b are an angle and a dimensionless
@@ -174,10 +203,14 @@ func (v Value) Div(o Value) (Value, error) {
 // isFinite reports whether x is a real number: neither an infinity nor a NaN.
 func isFinite(x float64) bool { return !math.IsInf(x, 0) && !math.IsNaN(x) }
 
-// Scale returns v multiplied by a dimensionless factor.
+// Scale returns v multiplied by a dimensionless factor. It reports no error, so
+// — unlike [Value.Mul] — it does not guarantee a finite result: an f large
+// enough to overflow the magnitude, an infinite f, or a NaN f yields a
+// non-finite Value. Use Mul with a [Scalar] where the result must be checked.
 func (v Value) Scale(f float64) Value { return Value{v.mag * f, v.unit} }
 
-// Neg returns −v.
+// Neg returns −v. It reports no error and cannot make a finite magnitude
+// non-finite; a v that is already non-finite negates to a non-finite Value.
 func (v Value) Neg() Value { return Value{-v.mag, v.unit} }
 
 // Equal reports whether v and o represent the same quantity to within tol of

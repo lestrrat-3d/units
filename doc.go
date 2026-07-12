@@ -14,7 +14,8 @@
 // A [System] records the current default length and angle units, used for
 // presenting base-unit quantities back in a chosen unit. Its default unit for a
 // kind always measures that kind, so presenting a value never changes what it
-// measures.
+// measures: a System field left unset, or holding a unit of the wrong kind, is
+// ignored in favour of the kind's base unit.
 //
 // The zero [Value] is 0 of the dimensionless unit [One], and arithmetic on it
 // behaves accordingly.
@@ -38,10 +39,14 @@
 //	a, _ := units.Millimeters(2).Mul(units.Millimeters(3)) // 6 mm², an Area
 //	l, _ := units.Liters(1).Div(units.SquareMeters(1))     // a Length
 //
-// [Value.Mul] and [Value.Div] yield a finite result or an error, never an
-// infinity and never a NaN: a zero base magnitude in a divisor is
-// [ErrDivideByZero], and a product or quotient that overflows or is a NaN is
-// [ErrNotFinite].
+// Every operation that can report an error yields a finite result or that error,
+// never an infinity and never a NaN: a zero base magnitude in a divisor is
+// [ErrDivideByZero], and a sum, difference, product, quotient or conversion that
+// overflows or is a NaN is [ErrNotFinite]. That covers [Value.Add], [Value.Sub],
+// [Value.Mul], [Value.Div], [Value.In] and [Value.Convert]. The operations with
+// no error to report — [New], [FromBase], [Value.Scale] and [Value.Neg] — do not
+// check: hand them an infinity, or scale past the float64 range, and a non-finite
+// Value comes back.
 //
 // The named kinds are [Dimensionless], [Length], [Area], [Volume], [Angle],
 // [Mass], [Density], [MomentOfInertia] and [SecondMomentOfArea]. Every one of

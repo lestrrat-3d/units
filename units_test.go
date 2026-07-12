@@ -626,36 +626,165 @@ func TestSystemDerivedKinds(t *testing.T) {
 
 func TestSystemNeverCoercesKind(t *testing.T) {
 	// Routing a value through the system's default unit must not change what it
-	// measures. If UnitFor handed back a unit of another kind, a curvature could
-	// be rebuilt as a dimensionless value — and then added to an angle, because
-	// Add carves out angle + dimensionless. A curvature would silently become an
-	// angle, with a nil error the whole way.
+	// measures. If UnitFor handed back a unit of another kind, a length or a
+	// curvature could be rebuilt as a dimensionless value — and then added to an
+	// angle, because Add carves out angle + dimensionless. It would silently
+	// become an angle, with a nil error the whole way.
+	//
+	// System has exported fields and a usable zero value, so every one of these
+	// is an ordinary construction, not a contrivance.
+	curvature := units.Dimensionless.Div(units.Length)
+	kinds := []units.Kind{
+		units.Dimensionless, units.Length, units.Angle, units.Area, units.Volume,
+		units.Mass, units.Density, units.MomentOfInertia, units.SecondMomentOfArea,
+		curvature,
+		units.Mass.Div(units.Area),
+		units.Length.Div(units.Angle),
+		units.Length.Pow(5),
+	}
+
+	for _, sc := range []struct {
+		name string
+		sys  units.System
+	}{
+		{"metric", units.Metric()},
+		{"si", units.SI()},
+		{"imperial", units.Imperial()},
+		{"zero value", units.System{}},
+		{"angle unset", units.System{Length: units.Meter}},
+		{"length unset", units.System{Angle: units.Degree}},
+		{"length field holds an angle", units.System{Length: units.Degree, Angle: units.Degree}},
+		{"angle field holds a length", units.System{Length: units.Meter, Angle: units.Meter}},
+		{"both fields hold the wrong kind", units.System{Length: units.Kilogram, Angle: units.SquareMeter}},
+	} {
+		t.Run(sc.name, func(t *testing.T) {
+			sys := sc.sys
+
+			for _, k := range kinds {
+				require.Equal(t, k, sys.UnitFor(k).Kind(),
+					"a default unit always measures the kind asked for: %s", k)
+				require.NotZero(t, sys.UnitFor(k).Factor(), "a default unit is usable: %s", k)
+			}
+
+			// The exploit chain, run in full: a 5 mm length round-tripped through
+			// the system's presentation unit is still a length, and a length plus
+			// an angle is still an error.
+			length := units.Millimeters(5)
+			round := units.New(length.Mag(), sys.UnitFor(length.Kind()))
+			require.Equal(t, units.Length, round.Kind(), "a round trip through UnitFor keeps a length a length")
+
+			_, err := round.Add(units.Degrees(90))
+			require.ErrorIs(t, err, units.ErrIncompatible, "a length is not an angle")
+
+			// And the same for an angle, which must not decay to a bare number
+			// either.
+			angle := units.Degrees(90)
+			roundA := units.New(angle.Mag(), sys.UnitFor(angle.Kind()))
+			require.Equal(t, units.Angle, roundA.Kind(), "a round trip through UnitFor keeps an angle an angle")
+
+			_, err = roundA.Add(units.Millimeters(1))
+			require.ErrorIs(t, err, units.ErrIncompatible, "an angle is not a length")
+
+			// In and Display preserve the kind and the quantity, on every system.
+			for _, v := range []units.Value{length, angle, units.Meters(2), units.SquareMeters(1), units.Kilograms(3)} {
+				d := sys.Display(v)
+				require.Equal(t, v.Kind(), d.Kind(), "Display preserves the kind: %s", v)
+				require.True(t, d.Equal(v, math.Abs(v.Base())*1e-9+1e-9), "Display preserves the quantity: %s", v)
+
+				want, err := v.In(sys.UnitFor(v.Kind()))
+				require.NoError(t, err, "the default unit always measures v's kind")
+				require.InDelta(t, want, sys.In(v), math.Abs(want)*1e-9+1e-9, "In agrees with the default unit: %s", v)
+			}
+
+			// FromBase wrappers land on the kind they name.
+			require.Equal(t, units.Length, sys.LengthFromBase(25.4).Kind())
+			require.InDelta(t, 25.4, sys.LengthFromBase(25.4).Base(), 1e-9)
+			require.Equal(t, units.Angle, sys.AngleFromBase(math.Pi).Kind())
+			require.InDelta(t, math.Pi, sys.AngleFromBase(math.Pi).Base(), 1e-9)
+		})
+	}
+
+	// An unnamed kind is presented in its synthetic factor-1 unit, never in One.
 	sys := units.Metric()
-
-	curvature, err := units.Scalar(1).Div(units.Millimeters(4))
+	c, err := units.Scalar(1).Div(units.Millimeters(4))
 	require.NoError(t, err)
-	require.Equal(t, units.Dimensionless.Div(units.Length), curvature.Kind())
+	require.Equal(t, curvature, c.Kind())
 
-	round := units.New(curvature.Mag(), sys.UnitFor(curvature.Kind()))
-	require.Equal(t, curvature.Kind(), round.Kind(), "a round trip through UnitFor keeps the kind")
-	require.InDelta(t, curvature.Base(), round.Base(), 1e-12, "…and the quantity")
+	round := units.New(c.Mag(), sys.UnitFor(c.Kind()))
+	require.Equal(t, c.Kind(), round.Kind(), "a round trip through UnitFor keeps the kind")
+	require.InDelta(t, c.Base(), round.Base(), 1e-12, "…and the quantity")
 
 	_, err = round.Add(units.Degrees(90))
 	require.ErrorIs(t, err, units.ErrIncompatible, "a curvature is not an angle")
 
-	// Display and In are correct by construction, not by luck.
-	require.Equal(t, curvature.Kind(), sys.Display(curvature).Kind())
-	require.InDelta(t, 0.25, sys.In(curvature), 1e-12)
+	require.Equal(t, c.Kind(), sys.Display(c).Kind())
+	require.InDelta(t, 0.25, sys.In(c), 1e-12)
+}
 
-	for _, k := range []units.Kind{
-		units.Dimensionless.Div(units.Length),
-		units.Mass.Div(units.Area),
-		units.Length.Div(units.Angle),
-		units.Length.Pow(5),
-		units.Area, units.Volume, units.Mass, units.Length, units.Angle, units.Dimensionless,
+func TestAddNotFinite(t *testing.T) {
+	// A sum is finite or it is an error, for the same reason a product is: an
+	// "+Inf m" carries a registered symbol, so it persists exactly like a real
+	// quantity and nothing downstream can tell it apart.
+	maxf := math.MaxFloat64
+
+	for _, tc := range []struct {
+		name string
+		op   func() (units.Value, error)
+	}{
+		{"add overflows to +Inf", func() (units.Value, error) { return units.Meters(maxf).Add(units.Meters(maxf)) }},
+		{"add overflows to -Inf", func() (units.Value, error) { return units.Meters(-maxf).Add(units.Meters(-maxf)) }},
+		{"add, operands swapped", func() (units.Value, error) { return units.Meters(maxf).Add(units.Millimeters(maxf)) }},
+		{"add, operands swapped the other way", func() (units.Value, error) {
+			return units.Millimeters(maxf).Add(units.Meters(maxf))
+		}},
+		{"sub overflows to -Inf", func() (units.Value, error) { return units.Meters(-maxf).Sub(units.Meters(maxf)) }},
+		{"sub overflows to +Inf", func() (units.Value, error) { return units.Meters(maxf).Sub(units.Meters(-maxf)) }},
+		{"sub, operands swapped", func() (units.Value, error) { return units.Meters(-maxf).Sub(units.Millimeters(maxf)) }},
+		{"an area sum", func() (units.Value, error) {
+			return units.SquareMeters(maxf).Add(units.SquareMeters(maxf))
+		}},
+		{"the angle/scalar carve-out overflows", func() (units.Value, error) {
+			return units.Radians(maxf).Add(units.Scalar(maxf))
+		}},
+		{"the carve-out, angle on the right", func() (units.Value, error) {
+			return units.Scalar(maxf).Add(units.Radians(maxf))
+		}},
+		{"a NaN operand", func() (units.Value, error) { return units.Millimeters(math.NaN()).Add(units.Millimeters(2)) }},
+		{"an infinite operand", func() (units.Value, error) {
+			return units.Millimeters(math.Inf(1)).Sub(units.Millimeters(2))
+		}},
 	} {
-		t.Run(k.String(), func(t *testing.T) {
-			require.Equal(t, k, sys.UnitFor(k).Kind(), "a default unit always measures the kind asked for")
+		t.Run(tc.name, func(t *testing.T) {
+			v, err := tc.op()
+			require.ErrorIs(t, err, units.ErrNotFinite)
+			require.Equal(t, units.Value{}, v, "no value escapes with the error")
 		})
 	}
+
+	// The finite sums around them still add.
+	s, err := units.Meters(1e308).Add(units.Meters(-1e308))
+	require.NoError(t, err)
+	require.Equal(t, units.Length, s.Kind())
+	require.InDelta(t, 0, s.Mag(), 0)
+
+	s, err = units.Meters(1).Add(units.Millimeters(500))
+	require.NoError(t, err)
+	require.InDelta(t, 1.5, s.Mag(), 1e-9)
+}
+
+func TestConversionNotFinite(t *testing.T) {
+	// In and Convert report an error, so they too refuse to hand back an infinity.
+	_, err := units.New(math.Inf(1), units.Meter).In(units.Millimeter)
+	require.ErrorIs(t, err, units.ErrNotFinite)
+
+	_, err = units.New(math.NaN(), units.Meter).Convert(units.Millimeter)
+	require.ErrorIs(t, err, units.ErrNotFinite)
+
+	// An overflow in the conversion itself, from a finite magnitude.
+	_, err = units.New(math.MaxFloat64, units.Meter).In(units.Thou)
+	require.ErrorIs(t, err, units.ErrNotFinite)
+
+	// A cross-kind conversion is still ErrIncompatible, not ErrNotFinite.
+	_, err = units.New(math.Inf(1), units.Meter).In(units.Degree)
+	require.ErrorIs(t, err, units.ErrIncompatible)
 }

@@ -56,10 +56,14 @@ top of it, and depends only on the standard library.
   unregistered unit whose symbol is bracketed (`[L^-1]`) — `Lookup` will not
   resolve it, so it must not be persisted. Compose it back into a named kind
   first. It is still that kind everywhere else: a `System`'s default unit for it
-  measures it, so presenting a value never changes what it measures.
-- **A result is finite, or it is an error.** `Mul` and `Div` never hand back an
-  `+Inf` or a `NaN` with a nil error: a zero base magnitude in a divisor is
-  `ErrDivideByZero`, and an overflowing or NaN result is `ErrNotFinite`.
+  measures it, so presenting a value never changes what it measures. A `System`
+  field left unset, or holding a unit of the wrong kind, is ignored in favour of
+  the kind's base unit — the zero `System` presents every kind as itself.
+- **A result is finite, or it is an error.** `Add`, `Sub`, `Mul`, `Div`, `In` and
+  `Convert` never hand back an `+Inf` or a `NaN` with a nil error: a zero base
+  magnitude in a divisor is `ErrDivideByZero`, and an overflowing or NaN result
+  is `ErrNotFinite`. The operations that have no error to return — `New`,
+  `FromBase`, `Scale`, `Neg` — cannot check, and do not.
 - **The zero `Value` is 0 of `One`**, so a `Value` declared with `var` behaves as
   a plain 0 in every operation.
 - **Extensible.** `Define` registers a new unit against a kind; a symbol may not

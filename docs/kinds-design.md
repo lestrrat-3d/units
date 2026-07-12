@@ -123,20 +123,32 @@ enumerating that length times length is an area.
 
 ### The result is finite, or it is an error
 
-`Value.Mul` and `Value.Div` both yield a **finite** magnitude or an error — never
-an `±Inf`, never a `NaN`:
+Every operation that **can** report an error yields a **finite** magnitude or that
+error — never an `±Inf`, never a `NaN`. That is `Value.Add`, `Value.Sub`,
+`Value.Mul`, `Value.Div`, `Value.In` and `Value.Convert`:
 
 - A zero base magnitude in the divisor is `ErrDivideByZero`.
-- A product or quotient that overflows to an infinity, or that is a `NaN`
-  (`Inf × 0`), is `ErrNotFinite`. Two sentinels, so the error says which thing
-  actually happened.
+- A sum, difference, product, quotient or conversion that overflows to an
+  infinity, or that is a `NaN` (`Inf × 0`), is `ErrNotFinite`. Two sentinels, so
+  the error says which thing actually happened.
 
 This is not fastidiousness. A result of a *named* kind carries a **registered**
 symbol, so `+Inf mm^2` serializes exactly like a real area and nothing downstream
 can tell it apart — an infinity that escaped with a nil error is a poisoned
-document. The same reason a unit's factor must be positive and finite: `Define`
-panics on a zero, negative, infinite or `NaN` factor, because every magnitude
-expressed in such a unit would convert back to an infinity or a `NaN`.
+document. `Add` is no different from `Mul` here: `Meters(math.MaxFloat64)` added
+to itself is `+Inf m`, as persistable as any length. The same reason a unit's
+factor must be positive and finite: `Define` panics on a zero, negative, infinite
+or `NaN` factor, because every magnitude expressed in such a unit would convert
+back to an infinity or a `NaN`.
+
+**The known edge:** the operations with **no error to return** cannot enforce
+this — `New`, `FromBase`, `Value.Scale` and `Value.Neg`. `New(math.Inf(1), Meter)`
+is an infinite length, and `Scale` on a large enough factor overflows to one.
+Their signatures are the constraint, not an oversight: a `Scale` returning
+`(Value, error)` would put an error check on every multiplication by a plain
+number. The limitation is stated in each doc comment, and the arithmetic that
+*can* refuse — `Add`, `Sub`, `Mul`, `Div` — does refuse, so a non-finite value has
+to be **constructed** on purpose rather than stumbled into.
 
 Exponents **saturate**, never wrap. `Pow` narrows its multiplier into the `int8`
 range before scaling, so even `Area.Pow(math.MinInt64)` lands on an endpoint of
@@ -178,6 +190,25 @@ symbols.
 `System.UnitFor(k)` returns a unit that measures `k` — always. For a length or an
 angle it is the system's configured unit, for any other named kind that kind's
 base unit, and for an unnamed kind the **synthetic factor-1 unit of that kind**.
+
+The configured unit is **validated**, not trusted. `System` has exported fields
+and a usable zero value — `units.System{Length: units.Meter}`, angle forgotten,
+is an ordinary construction — and the zero `Unit` reads as `One`, which is
+`Dimensionless`. So `UnitFor` checks that the configured field actually measures
+the kind it is configured for, and falls through to the base unit when it does
+not:
+
+```go
+case Length:
+    if u := s.Length.normalize(); u.kind == Length {
+        return u
+    }
+```
+
+Without that check `System{}.UnitFor(Length)` would be `One`, and a 5 mm length
+routed through it would come back **dimensionless** — then addable to an angle,
+via `Add`'s carve-out, with a nil error the whole way.
+
 It never falls back to `One`, which would be `Dimensionless`: routing a curvature
 through a dimensionless "default" would rebuild it as a bare number, and `Add`'s
 angle/dimensionless carve-out would then let it be added to an angle. A silent
