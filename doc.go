@@ -26,7 +26,27 @@
 //
 // # Kinds
 //
-// [Dimensionless] covers ratios, counts and multipliers. Base units are the
-// millimetre for [Length] and the radian for [Angle]; every unit stores its
-// conversion factor to its kind's base.
+// A [Kind] is a vector of dimension exponents — length, mass and angle — so
+// kinds compose instead of being enumerated. Multiplying two values multiplies
+// their magnitudes in base units and adds the exponents:
+//
+//	a, _ := units.Millimeters(2).Mul(units.Millimeters(3)) // 6 mm², an Area
+//	l, _ := units.Liters(1).Div(units.SquareMeters(1))     // a Length
+//
+// The named kinds are [Dimensionless], [Length], [Area], [Volume], [Angle],
+// [Mass], [Density], [MomentOfInertia] and [SecondMomentOfArea]. A kind need
+// not be named to be usable: dividing a dimensionless value by a length yields
+// an inverse length, which compares and prints ("L⁻¹") like any other kind,
+// though [BaseUnit] reports that no base unit is registered for it.
+//
+// Base units are the millimetre ([Length]), the square millimetre ([Area]), the
+// cubic millimetre ([Volume]), the kilogram ([Mass]), the kilogram per cubic
+// millimetre ([Density]) and the radian ([Angle]); every unit stores its
+// conversion factor to its kind's base. Unit symbols are ASCII and write an
+// exponent with a caret: "mm^2", "in^3", "kg/m^3".
+//
+// An angle is a dimension of its own even though a radian is physically a ratio
+// of two lengths, so that a bare number can never be mistaken for an angle. The
+// single carve-out is that [Value.Add] and [Value.Sub] accept an angle and a
+// dimensionless value together, because theta + pi/2 is an angle.
 package units

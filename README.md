@@ -12,6 +12,9 @@ in, err := w.In(units.Inch)   // 3.937...
 fmt.Println(w)                // "100 mm"
 
 _, err = w.Convert(units.Degree)  // error: a length is not an angle
+
+a, err := units.Millimeters(2).Mul(units.Millimeters(3))  // "6 mm^2", an Area
+v, err := a.Mul(units.Millimeters(4))                     // "24 mm^3", a Volume
 ```
 
 ## Why
@@ -34,9 +37,22 @@ top of it, and depends only on the standard library.
 - **Units are typed, never stringly.** You name a unit through a `Unit` constant
   (`Millimeter`, `Inch`, `Degree`), not by passing `"mm"` around. `Lookup` exists
   for deserialization; it is not the normal way to build a value.
-- **Base units are the millimetre (`Length`) and the radian (`Angle`).** Every
-  unit stores its factor to its kind's base.
-- **Extensible.** `Define` registers a new unit against an existing kind.
+- **Kinds are dimensions, not an enumeration.** A `Kind` is a vector of exponents
+  over length, mass and angle, so kinds compose: `Mul` adds them and `Div`
+  subtracts them, and `Area`, `Volume`, `Density` (M·L⁻³), `MomentOfInertia`
+  (M·L²) and `SecondMomentOfArea` (L⁴) fall out for free. A kind nobody named —
+  an inverse length, say — is still a kind: it compares and prints (`L⁻¹`),
+  though no base unit is registered for it.
+- **An angle is its own dimension**, even though a radian is physically a ratio
+  of two lengths, so a bare number can never pass as an angle. The one carve-out
+  is that `Add`/`Sub` accept an angle and a dimensionless value together.
+- **Base units** are the millimetre (`Length`), the square millimetre (`Area`),
+  the cubic millimetre (`Volume`), the kilogram (`Mass`), the kilogram per cubic
+  millimetre (`Density`) and the radian (`Angle`). Every unit stores its factor
+  to its kind's base. Symbols are ASCII, with a caret for an exponent: `mm^2`,
+  `in^3`, `kg/m^3`.
+- **Extensible.** `Define` registers a new unit against a kind; a symbol may not
+  be redefined.
 
 ## License
 

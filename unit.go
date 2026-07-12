@@ -1,37 +1,17 @@
 package units
 
-import "math"
-
-// Kind is the physical quantity a unit measures. A [Value] never converts
-// across kinds: a length is not an angle, and asking for one as the other is
-// an error rather than a coercion.
-type Kind int
-
-const (
-	// Dimensionless is a pure number (ratios, counts, multipliers).
-	Dimensionless Kind = iota
-	// Length is a linear distance; its base unit is the millimetre.
-	Length
-	// Angle is a planar angle; its base unit is the radian.
-	Angle
+import (
+	"math"
+	"strconv"
 )
-
-// String returns a human-readable name for the kind.
-func (k Kind) String() string {
-	switch k {
-	case Length:
-		return "length"
-	case Angle:
-		return "angle"
-	default:
-		return "dimensionless"
-	}
-}
 
 // Unit is a unit of measure. Units are values, compared by identity of their
 // (symbol, kind, factor); obtain them from the package constants such as
 // [Millimeter] or [Degree], or register new ones with [Define]. There is no
 // way to name a unit by a bare string in the value-building API.
+//
+// Symbols are ASCII. A dimension exponent is written with a caret and a digit:
+// "mm^2" is the square millimetre, "kg/mm^3" the kilogram per cubic millimetre.
 type Unit struct {
 	symbol string
 	kind   Kind
@@ -42,7 +22,7 @@ type Unit struct {
 // dimensionless unit.
 func (u Unit) Symbol() string { return u.symbol }
 
-// Kind returns the quantity the unit measures.
+// Kind returns the kind of quantity the unit measures.
 func (u Unit) Kind() Kind { return u.kind }
 
 // Factor returns the multiplier that converts a magnitude in this unit to the
@@ -57,49 +37,105 @@ func (u Unit) String() string {
 	return u.symbol
 }
 
-// The built-in units. Base units (factor 1) are Millimeter and Radian.
+// The built-in units. Every kind with a name has a base unit, whose factor is 1:
+// [One], [Millimeter], [SquareMillimeter], [CubicMillimeter], [Kilogram],
+// [KilogramPerCubicMillimeter] and [Radian].
 var (
 	// One is the dimensionless unit.
-	One = define("", Dimensionless, 1)
+	One = defineBase("", Dimensionless)
 
-	// Millimeter, and the length units below it, measure Length; the millimetre
-	// is the base unit.
-	Millimeter = define("mm", Length, 1)
+	// Millimeter, and the length units below it, measure [Length]; the
+	// millimetre is the base unit.
+	Millimeter = defineBase("mm", Length)
 	Centimeter = define("cm", Length, 10)
 	Meter      = define("m", Length, 1000)
 	Inch       = define("in", Length, 25.4)
 	Foot       = define("ft", Length, 304.8)
 	Thou       = define("thou", Length, 0.0254) // a.k.a. mil; 1/1000 inch
 
-	// Radian and Degree measure Angle; the radian is the base unit.
-	Radian = define("rad", Angle, 1)
+	// SquareMillimeter, and the area units below it, measure [Area]; the square
+	// millimetre is the base unit.
+	SquareMillimeter = defineBase("mm^2", Area)
+	SquareCentimeter = define("cm^2", Area, 100)
+	SquareMeter      = define("m^2", Area, 1e6)
+	SquareInch       = define("in^2", Area, 645.16)
+
+	// CubicMillimeter, and the volume units below it, measure [Volume]; the
+	// cubic millimetre is the base unit.
+	CubicMillimeter = defineBase("mm^3", Volume)
+	CubicCentimeter = define("cm^3", Volume, 1000) // the millilitre
+	CubicMeter      = define("m^3", Volume, 1e9)
+	CubicInch       = define("in^3", Volume, 16387.064)
+	Liter           = define("L", Volume, 1e6)
+
+	// Kilogram, and the mass units below it, measure [Mass]; the kilogram is the
+	// base unit.
+	Kilogram = defineBase("kg", Mass)
+	Gram     = define("g", Mass, 0.001)
+	Pound    = define("lb", Mass, 0.45359237)
+
+	// KilogramPerCubicMillimeter, and the density units below it, measure
+	// [Density]; the kilogram per cubic millimetre is the base unit.
+	KilogramPerCubicMillimeter = defineBase("kg/mm^3", Density)
+	KilogramPerCubicMeter      = define("kg/m^3", Density, 1e-9)
+	GramPerCubicCentimeter     = define("g/cm^3", Density, 1e-6)
+
+	// Radian and Degree measure [Angle]; the radian is the base unit.
+	Radian = defineBase("rad", Angle)
 	Degree = define("deg", Angle, math.Pi/180)
 )
-
-// BaseUnit returns the base unit for a kind (factor 1).
-func BaseUnit(k Kind) Unit {
-	switch k {
-	case Length:
-		return Millimeter
-	case Angle:
-		return Radian
-	default:
-		return One
-	}
-}
 
 // registry maps symbols back to units for serialization and lookup.
 var registry = map[string]Unit{}
 
+// baseUnits maps a kind to its base unit — the one whose factor is 1. Only the
+// named kinds have an entry; a kind produced by composition need not.
+var baseUnits = map[Kind]Unit{}
+
+// BaseUnit returns the base unit registered for a kind (the unit whose factor
+// is 1), and whether there is one. An unnamed kind — an inverse length, say,
+// produced by dividing a dimensionless value by a length — has no base unit,
+// and reports false.
+func BaseUnit(k Kind) (Unit, bool) {
+	u, ok := baseUnits[k]
+	return u, ok
+}
+
+// baseUnitFor returns the unit a composed [Value] is carried in: the kind's
+// registered base unit when it has one, and otherwise an ad-hoc unit of factor
+// 1 whose symbol is the kind's exponent form. That ad-hoc unit is not added to
+// the registry, so [Lookup] does not find it and [BaseUnit] still reports the
+// kind as having none.
+func baseUnitFor(k Kind) Unit {
+	if u, ok := baseUnits[k]; ok {
+		return u
+	}
+	return Unit{symbol: k.String(), kind: k, factor: 1}
+}
+
 func define(symbol string, kind Kind, factor float64) Unit {
+	if _, dup := registry[symbol]; dup {
+		panic("units: unit symbol already defined: " + strconv.Quote(symbol))
+	}
 	u := Unit{symbol: symbol, kind: kind, factor: factor}
 	registry[symbol] = u
 	return u
 }
 
+func defineBase(symbol string, kind Kind) Unit {
+	u := define(symbol, kind, 1)
+	baseUnits[kind] = u
+	return u
+}
+
 // Define registers and returns a new unit measuring kind, whose magnitudes
 // convert to the kind's base unit by multiplying by factorToBase. It enables
-// callers to extend the built-in set (e.g. a "yard"). The symbol must be unique.
+// callers to extend the built-in set (e.g. a "yard").
+//
+// The symbol must be unique: Define panics if it is already registered.
+// Redefining a symbol would change the meaning of every value that names it,
+// including the built-ins, so a collision is a programming error rather than an
+// intent to replace.
 func Define(symbol string, kind Kind, factorToBase float64) Unit {
 	return define(symbol, kind, factorToBase)
 }

@@ -11,6 +11,10 @@ import (
 // (for example adding a length to an angle).
 var ErrIncompatible = errors.New("units: incompatible kinds")
 
+// ErrDivideByZero is returned by [Value.Div] when the divisor's magnitude is
+// zero; the quotient is an error rather than an infinity.
+var ErrDivideByZero = errors.New("units: division by zero")
+
 // Value is a magnitude paired with the [Unit] it is expressed in. The zero
 // Value is 0 of the dimensionless unit [One].
 type Value struct {
@@ -37,6 +41,25 @@ func Degrees(x float64) Value     { return Value{x, Degree} }
 func Radians(x float64) Value     { return Value{x, Radian} }
 func Scalar(x float64) Value      { return Value{x, One} }
 
+func SquareMillimeters(x float64) Value { return Value{x, SquareMillimeter} }
+func SquareCentimeters(x float64) Value { return Value{x, SquareCentimeter} }
+func SquareMeters(x float64) Value      { return Value{x, SquareMeter} }
+func SquareInches(x float64) Value      { return Value{x, SquareInch} }
+
+func CubicMillimeters(x float64) Value { return Value{x, CubicMillimeter} }
+func CubicCentimeters(x float64) Value { return Value{x, CubicCentimeter} }
+func CubicMeters(x float64) Value      { return Value{x, CubicMeter} }
+func CubicInches(x float64) Value      { return Value{x, CubicInch} }
+func Liters(x float64) Value           { return Value{x, Liter} }
+
+func Kilograms(x float64) Value { return Value{x, Kilogram} }
+func Grams(x float64) Value     { return Value{x, Gram} }
+func Pounds(x float64) Value    { return Value{x, Pound} }
+
+func KilogramsPerCubicMillimeter(x float64) Value { return Value{x, KilogramPerCubicMillimeter} }
+func KilogramsPerCubicMeter(x float64) Value      { return Value{x, KilogramPerCubicMeter} }
+func GramsPerCubicCentimeter(x float64) Value     { return Value{x, GramPerCubicCentimeter} }
+
 // Mag returns the magnitude in the value's own unit.
 func (v Value) Mag() float64 { return v.mag }
 
@@ -46,8 +69,8 @@ func (v Value) Unit() Unit { return v.unit }
 // Kind returns the kind of quantity the value measures.
 func (v Value) Kind() Kind { return v.unit.kind }
 
-// Base returns the magnitude expressed in the kind's base unit (mm for length,
-// rad for angle).
+// Base returns the magnitude expressed in the kind's base unit (mm for a
+// length, mm² for an area, rad for an angle).
 func (v Value) Base() float64 { return v.mag * v.unit.factor }
 
 // In returns the magnitude expressed in unit u, or [ErrIncompatible] if u
@@ -68,22 +91,57 @@ func (v Value) Convert(u Unit) (Value, error) {
 	return Value{m, u}, nil
 }
 
-// Add returns v + o, expressed in v's unit. The operands must be the same kind.
-func (v Value) Add(o Value) (Value, error) {
-	m, err := o.In(v.unit)
-	if err != nil {
-		return Value{}, err
+// Add returns v + o. The operands must be the same kind, with one carve-out: an
+// [Angle] may be added to a [Dimensionless] value, because a radian really is a
+// ratio of two lengths and theta + pi/2 is an angle. The result is expressed in
+// v's unit, or — for that carve-out — in whichever operand's unit is the angle,
+// so the sum is an angle whichever side it appeared on.
+func (v Value) Add(o Value) (Value, error) { return v.combine(o, 1) }
+
+// Sub returns v − o, under the same rules as [Value.Add].
+func (v Value) Sub(o Value) (Value, error) { return v.combine(o, -1) }
+
+// combine adds sign*o to v.
+func (v Value) combine(o Value, sign float64) (Value, error) {
+	if v.unit.kind == o.unit.kind {
+		return Value{v.mag + sign*o.mag*o.unit.factor/v.unit.factor, v.unit}, nil
 	}
-	return Value{v.mag + m, v.unit}, nil
+
+	if isAngleScalarPair(v.unit.kind, o.unit.kind) {
+		u := v.unit
+		if v.unit.kind == Dimensionless {
+			u = o.unit
+		}
+		return FromBase(v.Base()+sign*o.Base(), u), nil
+	}
+
+	return Value{}, fmt.Errorf("%w: cannot combine %s with %s", ErrIncompatible, v.unit.kind, o.unit.kind)
 }
 
-// Sub returns v − o, expressed in v's unit. The operands must be the same kind.
-func (v Value) Sub(o Value) (Value, error) {
-	m, err := o.In(v.unit)
-	if err != nil {
-		return Value{}, err
+// isAngleScalarPair reports whether a and b are an angle and a dimensionless
+// value, in either order — the one pair Add and Sub accept across kinds.
+func isAngleScalarPair(a, b Kind) bool {
+	return (a == Angle && b == Dimensionless) || (a == Dimensionless && b == Angle)
+}
+
+// Mul returns v × o: the magnitudes multiplied in base units, and the kinds
+// composed. Millimeters(2).Mul(Millimeters(3)) is 6 mm², an [Area]. The result
+// is carried in the base unit of the resulting kind.
+func (v Value) Mul(o Value) (Value, error) {
+	u := baseUnitFor(v.unit.kind.Mul(o.unit.kind))
+	return Value{v.Base() * o.Base(), u}, nil
+}
+
+// Div returns v ÷ o: the magnitudes divided in base units, and the kinds
+// composed. Volume divided by Area is a [Length]. The result is carried in the
+// base unit of the resulting kind. Dividing by a zero magnitude is
+// [ErrDivideByZero], not an infinity.
+func (v Value) Div(o Value) (Value, error) {
+	if o.Base() == 0 {
+		return Value{}, fmt.Errorf("%w: cannot divide %s by %s", ErrDivideByZero, v, o)
 	}
-	return Value{v.mag - m, v.unit}, nil
+	u := baseUnitFor(v.unit.kind.Div(o.unit.kind))
+	return Value{v.Base() / o.Base(), u}, nil
 }
 
 // Scale returns v multiplied by a dimensionless factor.

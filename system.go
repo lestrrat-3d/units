@@ -17,7 +17,10 @@ func SI() System { return System{Length: Meter, Angle: Radian} }
 // Imperial returns a system using inches and degrees.
 func Imperial() System { return System{Length: Inch, Angle: Degree} }
 
-// UnitFor returns the system's default unit for a kind.
+// UnitFor returns the system's default unit for a kind: the configured length
+// or angle unit, and for any other kind its base unit — square millimetres for
+// an area, kilograms for a mass. A kind with no base unit ([BaseUnit] reports
+// false for it) has no presentation unit either, and yields [One].
 func (s System) UnitFor(k Kind) Unit {
 	switch k {
 	case Length:
@@ -25,6 +28,9 @@ func (s System) UnitFor(k Kind) Unit {
 	case Angle:
 		return s.Angle
 	default:
+		if u, ok := BaseUnit(k); ok {
+			return u
+		}
 		return One
 	}
 }

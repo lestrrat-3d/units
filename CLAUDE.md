@@ -6,7 +6,10 @@ Update when a design variable gets resolved.
 ## What this is
 
 A small, self-contained **units-of-measure** library in Go. A `Unit` is a symbol
-+ `Kind` + conversion factor; a `Value` is a magnitude + its `Unit`.
++ `Kind` + conversion factor; a `Value` is a magnitude + its `Unit`. A `Kind` is
+a vector of dimension exponents (length, mass, angle), so kinds compose:
+`Length.Mul(Length) == Area`, and `Value.Mul`/`Value.Div` derive the result kind
+instead of enumerating it. Design contract: `docs/kinds-design.md`.
 
 It is a **foundation module**: consumed by `github.com/lestrrat-3d/sketch` and
 `github.com/lestrrat-3d/decad`. It knows about neither.
@@ -20,7 +23,9 @@ It is a **foundation module**: consumed by `github.com/lestrrat-3d/sketch` and
   geometry. Quantities and conversions only — if it is not a quantity or a
   conversion, it does not belong here.
 - **NEVER coerce across kinds.** A length is not an angle. Converting between
-  kinds returns an `error`; it is never a silent reinterpretation.
+  kinds returns an `error`; it is never a silent reinterpretation. `Angle` is a
+  dimension of its own, never unified with `Dimensionless`; the sole carve-out
+  is `Add`/`Sub` between an angle and a dimensionless value.
 - **NEVER accept a unit as a bare string** in the value-building API. Units are
   typed constants. `Lookup` exists for deserialization only.
 - **NEVER return a naked `float64`** for a quantity that has a unit. That is the
@@ -31,7 +36,8 @@ It is a **foundation module**: consumed by `github.com/lestrrat-3d/sketch` and
 
 | Path | Responsibility |
 |---|---|
-| `unit.go` | `Kind`, `Unit`, the built-in unit set, `BaseUnit`, `Define`, `Lookup`, the registry. |
+| `kind.go` | `Kind` — dimension exponents, the named kinds, `Mul`/`Div`/`Pow`, `String`. |
+| `unit.go` | `Unit`, the built-in unit set, `BaseUnit`, `Define`, `Lookup`, the registry. |
 | `value.go` | `Value` — magnitude + unit, conversion, arithmetic, formatting. |
 | `system.go` | `System` — the current default units, for presenting base-unit quantities. |
 | `doc.go` | Package doc: scope + the no-naked-float rule. |
@@ -41,6 +47,9 @@ It is a **foundation module**: consumed by `github.com/lestrrat-3d/sketch` and
 - Go style, testing and file-layout rules: `~/.claude/docs/go.md`. Tests use
   `testify/require` (never `assert`), external `units_test` package.
 - Docs state **current state only** — no changelogs, no "was X, now Y".
+- **Unit symbols are ASCII**, with a caret for an exponent: `mm^2`, `in^3`,
+  `kg/m^3`. `Kind.String()` is the one place Unicode superscripts appear (`L⁻¹`),
+  and it is display text, never a registry key.
 
 ## Verification
 
