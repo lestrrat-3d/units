@@ -57,6 +57,10 @@
 // an ordinary divisor rather than a zero one. [Value.Base] is an accessor, not an
 // operation, and reports the infinity — or the zero — honestly.
 //
+// The range is not paid for in accuracy: the arithmetic rounds where the plain
+// expression rounds and never once more, down among the subnormals as anywhere
+// else. [Scalar](1.25) divided by [Centimeters](1e307) is 1.25e-308.
+//
 // [System.In] presents a magnitude in the system's unit for the value's kind and
 // has no error to report, so a magnitude that unit cannot hold comes back as the
 // infinity it is — never as a finite number that would be read as a quantity it
@@ -68,6 +72,15 @@
 // dividing a dimensionless value by a length yields an inverse length, which
 // compares and prints ("L⁻¹") like any other kind, though [BaseUnit] reports
 // that no base unit is registered for it.
+//
+// A dimension exponent is an int8. A composition that runs past that range —
+// [Length].Pow(math.MaxInt64) — saturates at the endpoint and marks the kind
+// overflowed ([Kind.Overflowed]). The mark is sticky: [Kind.Mul], [Kind.Div] and
+// [Kind.Pow] propagate it, so an overflowed kind never composes back into an
+// ordinary one. It equals no named kind, prints as "overflowed", has no base
+// unit, and carries the reserved synthetic symbol "[overflow]" — a saturated
+// exponent is a lie about the number, and it must not be able to pass for a
+// plausible kind.
 //
 // Base units are the millimetre ([Length]), the square millimetre ([Area]), the
 // cubic millimetre ([Volume]), the kilogram ([Mass]), the kilogram per cubic

@@ -1,6 +1,7 @@
 package units_test
 
 import (
+	"fmt"
 	"math"
 	"math/big"
 	"strconv"
@@ -580,6 +581,59 @@ func TestSyntheticUnitSymbol(t *testing.T) {
 	}
 }
 
+// wideLength is an application-defined unit of an exotic-but-representable kind:
+// L¹²⁰. Multiplying two of its values composes L²⁴⁰, which no int8 exponent
+// holds — the only way to reach an overflowed kind from the Value API.
+var wideLength = units.Define("L120", units.Length.Pow(120), 1)
+
+func TestOverflowedKindHasNoUnit(t *testing.T) {
+	// An overflowed kind is a programming error made visible. Nothing about it may
+	// look like a real quantity: no name, no base unit, no resolvable symbol, and
+	// no presentation unit of some other kind that a consumer could read as one.
+	v, err := units.New(2, wideLength).Mul(units.New(3, wideLength))
+	require.NoError(t, err, "the magnitudes are ordinary; it is the kind that overflowed")
+	require.InDelta(t, 6, v.Mag(), 0)
+
+	k := v.Kind()
+	require.True(t, k.Overflowed(), "L²⁴⁰ does not fit an int8 exponent")
+	require.Equal(t, "overflowed", k.String())
+	require.NotEmpty(t, k.String())
+
+	_, ok := units.BaseUnit(k)
+	require.False(t, ok, "an overflowed kind has no base unit")
+
+	require.Equal(t, "[overflow]", v.Unit().Symbol(), "and carries the reserved synthetic symbol")
+	for _, r := range v.Unit().Symbol() {
+		require.Less(t, r, rune(utf8.RuneSelf), "a unit symbol is ASCII")
+	}
+	_, ok = units.Lookup(v.Unit().Symbol())
+	require.False(t, ok, "the synthetic symbol is not a registry key")
+	require.Panics(t, func() { units.Define("[overflow]", units.Length, 1) },
+		"the bracketed namespace is reserved, so nothing can hijack it")
+
+	// Presentation never hands back a unit of some other kind — the rule that keeps
+	// an overflowed quantity from being read as a length or a bare number.
+	for _, sys := range []units.System{units.Metric(), units.SI(), units.Imperial(), {}} {
+		u := sys.UnitFor(k)
+		require.Equal(t, k, u.Kind(), "UnitFor answers in the kind it was asked about")
+		require.True(t, u.Kind().Overflowed())
+		require.Equal(t, "[overflow]", u.Symbol())
+		require.Equal(t, k, sys.Display(v).Kind(), "Display preserves the kind")
+	}
+
+	// It never equals a named kind, so it can neither be added to one nor converted
+	// into one.
+	for _, named := range namedKinds() {
+		require.NotEqual(t, named, k)
+		u, ok := units.BaseUnit(named)
+		require.True(t, ok)
+		_, err := v.In(u)
+		require.ErrorIs(t, err, units.ErrIncompatible, "an overflowed quantity is not a %s", named)
+	}
+	_, err = v.Add(units.Millimeters(1))
+	require.ErrorIs(t, err, units.ErrIncompatible)
+}
+
 func TestReservedSymbolNamespace(t *testing.T) {
 	// Bracketed symbols belong to the library: a consumer that could register one
 	// could make a persisted synthetic symbol deserialize as a different kind.
@@ -961,6 +1015,24 @@ func ulpErr(t *testing.T, got float64, want *big.Rat) float64 {
 		return 0
 	}
 	return ulpsBetween(t, got, want, ulpAt(w))
+}
+
+// naiveUlpErr measures the plain expression the helpers replaced. It is the same
+// distance ulpErr reports, except that the plain expression is entitled to be
+// unusable at the extremes: an intermediate of its own that overflows leaves it
+// an infinity or a NaN, which is infinitely far from the true result — and a true
+// result that rounds to zero is measured against the last place of the subnormal
+// range, since it has no last place of its own.
+func naiveUlpErr(t *testing.T, naive float64, want *big.Rat) float64 {
+	t.Helper()
+
+	if math.IsInf(naive, 0) || math.IsNaN(naive) {
+		return math.Inf(1)
+	}
+	if w, _ := want.Float64(); w == 0 {
+		return ulpsBetween(t, naive, want, math.SmallestNonzeroFloat64)
+	}
+	return ulpErr(t, naive, want)
 }
 
 // ulpAt returns the size of the last place of x: x == mantissa × 2**e with the
@@ -1508,6 +1580,170 @@ func TestArithmeticIsNoWorseThanNaive(t *testing.T) {
 						require.LessOrEqual(t, ulpErr(t, q.Mag(), want), ulpErr(t, naive, want),
 							"%s / %s: %v is further from the true result than the plain %v", a, b, q.Mag(), naive)
 					}
+				}
+			}
+		}
+	})
+}
+
+// hugeLength and tinyLength are application-defined units whose factors sit at
+// the ends of the float64 range. They are what turns an everyday magnitude into
+// a base magnitude that overflows, or one that lands among the subnormals, so
+// the accuracy sweep below can reach both without leaving the ordinary API.
+var (
+	hugeLength = units.Define("Lhuge", units.Length, 1e300)
+	tinyLength = units.Define("Ltiny", units.Length, 1e-300)
+)
+
+// extremeMags are the magnitudes accuracy has to survive, not merely the ones a
+// caller writes: the smallest subnormal and its neighbours, the boundary between
+// the subnormal and normal ranges, and the top of the float64 range.
+func extremeMags() []float64 {
+	return []float64{
+		5e-324, 1e-323, 3e-322, 1e-310, // subnormals
+		2.2250738585072014e-308, // the smallest normal
+		1e-300, 0.001, 1, 1.25, -2.5, 25.4, math.Pi, 1e300, 1e307, 1e308, math.MaxFloat64,
+	}
+}
+
+// extremeUnits are the units the accuracy sweep runs over: a representative unit
+// of every kind, plus the two application-defined factors of 1e±300.
+func extremeUnits() []units.Unit {
+	return []units.Unit{
+		units.One,
+		units.Millimeter, units.Centimeter, units.Meter, units.Inch, units.Thou,
+		units.Gram, units.Kilogram,
+		units.Degree, units.Radian, turn,
+		units.SquareMeter, units.Liter, units.GramPerCubicCentimeter,
+		hugeLength, tinyLength,
+	}
+}
+
+// extremeUlpBound is the accuracy Mul, Div, In and Convert are held to at the
+// extremes: the result lands within two ulps of the true one, subnormals
+// included. It is a bound on top of the sweep's real assertion — that no result
+// is further out than the plain expression it replaced — and it is what pins the
+// subnormal range, where the plain expression is often unusable and so is a low
+// bar to clear.
+//
+// Two ulps rather than a half is the honest bound: (a × af) × (b × bf) rounds
+// three times whoever computes it — the two base magnitudes and the product — so
+// neither the helpers nor the plain expression is correctly rounded in general.
+// What the helpers guarantee is that they round where the plain expression
+// rounds, and once — never a fourth time on the way back down into the
+// subnormals.
+const extremeUlpBound = 2
+
+// requireNoWorseThanNaivef asserts the whole accuracy contract of a helper at one
+// point: the result is no further from the true value than the plain expression
+// (which, at the extremes, is often an infinity or a zero — so the bar is only
+// low where the plain expression is unusable), and it is within the ulp bound.
+func requireNoWorseThanNaivef(t *testing.T, got, naive float64, want *big.Rat, format string, args ...any) {
+	t.Helper()
+
+	label := fmt.Sprintf(format, args...)
+	ours := ulpErr(t, got, want)
+	require.LessOrEqual(t, ours, naiveUlpErr(t, naive, want),
+		"%s: %v is further from the true result %s than the plain %v", label, got, want.FloatString(3), naive)
+	require.LessOrEqual(t, ours, float64(extremeUlpBound),
+		"%s: %v is more than %d ulp from the true result %s", label, got, extremeUlpBound, want.FloatString(3))
+}
+
+func TestArithmeticAtTheExtremesIsNoWorseThanNaive(t *testing.T) {
+	// The sweep above judges accuracy where nothing can be excused as the float64
+	// range running out. This one judges it exactly where that excuse is available
+	// and must not be taken: at the top of the range, and down among the
+	// subnormals, where a result that is rounded a second time on its way into the
+	// range is worse than the plain expression that rounds once.
+	t.Run("the reproducers", func(t *testing.T) {
+		// 1.25 ÷ 1e307 cm is 1.25e-308: a subnormal, and exactly what the plain
+		// expression gives, because 1.25e307 cm is 1e308 mm — still in range.
+		q, err := units.Scalar(1.25).Div(units.Centimeters(1e307))
+		require.NoError(t, err)
+		require.Equal(t, 1.25e-308, q.Mag(), "a subnormal quotient is rounded once, not twice")
+		require.Equal(t, (1.25*1)/(1e307*10), q.Mag(), "…which is what the plain expression gives")
+
+		// 5e-324 m × -2.5 g is -3 × 2⁻¹⁰⁷⁴: three ulps of the subnormal range, not
+		// the two a second rounding would give.
+		p, err := units.Meters(5e-324).Mul(units.Grams(-2.5))
+		require.NoError(t, err)
+		require.Equal(t, -1.5e-323, p.Mag(), "a subnormal product is rounded once, not twice")
+		require.Equal(t, (5e-324*1000)*(-2.5*0.001), p.Mag(), "…which is what the plain expression gives")
+	})
+
+	t.Run("Mul", func(t *testing.T) {
+		for _, ua := range extremeUnits() {
+			for _, ub := range extremeUnits() {
+				for _, ma := range extremeMags() {
+					for _, mb := range extremeMags() {
+						a, b := units.New(ma, ua), units.New(mb, ub)
+						want := new(big.Rat).Mul(
+							new(big.Rat).Mul(ratOf(t, ma), ratOf(t, ua.Factor())),
+							new(big.Rat).Mul(ratOf(t, mb), ratOf(t, ub.Factor())))
+
+						p, err := a.Mul(b)
+						if new(big.Rat).Abs(want).Cmp(halfMax) > 0 {
+							continue // the true product is out of range; ErrNotFinite is its own test
+						}
+						require.NoError(t, err, "the true product %s is representable", want.FloatString(3))
+
+						naive := (ma * ua.Factor()) * (mb * ub.Factor())
+						requireNoWorseThanNaivef(t, p.Mag(), naive, want, "%s x %s", a, b)
+					}
+				}
+			}
+		}
+	})
+
+	t.Run("Div", func(t *testing.T) {
+		for _, ua := range extremeUnits() {
+			for _, ub := range extremeUnits() {
+				for _, ma := range extremeMags() {
+					for _, mb := range extremeMags() {
+						a, b := units.New(ma, ua), units.New(mb, ub)
+						want := new(big.Rat).Quo(
+							new(big.Rat).Mul(ratOf(t, ma), ratOf(t, ua.Factor())),
+							new(big.Rat).Mul(ratOf(t, mb), ratOf(t, ub.Factor())))
+
+						q, err := a.Div(b)
+						if new(big.Rat).Abs(want).Cmp(halfMax) > 0 {
+							continue // the true quotient is out of range
+						}
+						require.NoError(t, err, "the true quotient %s is representable", want.FloatString(3))
+
+						naive := (ma * ua.Factor()) / (mb * ub.Factor())
+						requireNoWorseThanNaivef(t, q.Mag(), naive, want, "%s / %s", a, b)
+					}
+				}
+			}
+		}
+	})
+
+	t.Run("In and Convert", func(t *testing.T) {
+		for _, from := range extremeUnits() {
+			for _, to := range extremeUnits() {
+				if from.Kind() != to.Kind() {
+					continue
+				}
+
+				for _, m := range extremeMags() {
+					v := units.New(m, from)
+					want := new(big.Rat).Quo(
+						new(big.Rat).Mul(ratOf(t, m), ratOf(t, from.Factor())),
+						ratOf(t, to.Factor()))
+
+					got, err := v.In(to)
+					if new(big.Rat).Abs(want).Cmp(halfMax) > 0 {
+						continue // the true magnitude is out of range in the target unit
+					}
+					require.NoError(t, err, "the true magnitude %s is representable", want.FloatString(3))
+
+					naive := m * from.Factor() / to.Factor()
+					requireNoWorseThanNaivef(t, got, naive, want, "%s in %s", v, to)
+
+					c, err := v.Convert(to)
+					require.NoError(t, err)
+					require.Equal(t, got, c.Mag(), "Convert agrees with In: %s in %s", v, to)
 				}
 			}
 		}

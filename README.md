@@ -46,6 +46,13 @@ top of it, and depends only on the standard library.
 - **An angle is its own dimension**, even though a radian is physically a ratio
   of two lengths, so a bare number can never pass as an angle. The one carve-out
   is that `Add`/`Sub` accept an angle and a dimensionless value together.
+- **An exponent that overflows says so, and keeps saying so.** Exponents are
+  `int8`; a composition that runs off the end saturates and marks the kind
+  **overflowed** (`Kind.Overflowed()`). The mark is sticky: `Mul`, `Div` and `Pow`
+  propagate it, so an overflowed kind never equals a named kind, prints as
+  `overflowed`, has no base unit, and carries the reserved `[overflow]` symbol.
+  A saturated exponent is a lie about the number; without the mark, dividing an
+  overflowed `L¹²⁷` by `L¹²⁶` would hand back a perfectly plausible `Length`.
 - **Every named kind has a base unit**: the millimetre (`Length`), the square
   millimetre (`Area`), the cubic millimetre (`Volume`), the kilogram (`Mass`),
   the kilogram per cubic millimetre (`Density`), the kilogram square millimetre
@@ -75,7 +82,10 @@ top of it, and depends only on the standard library.
   kind, returns the infinity rather than a finite number in another unit.
 - **The range costs no accuracy.** Conversions are exact where the arithmetic is:
   `25.4 mm` is exactly `1 in`, `1000 g/cm³` exactly `1e6 kg/m³`, a value in its own
-  unit is its own magnitude, and a value divided by itself is exactly `1`.
+  unit is its own magnitude, and a value divided by itself is exactly `1`. The
+  arithmetic rounds where the plain expression rounds and never once more —
+  subnormal results included, where a second rounding would be worse than the
+  plain expression: `Scalar(1.25).Div(Centimeters(1e307))` is `1.25e-308`.
 - **The zero `Value` is 0 of `One`**, so a `Value` declared with `var` behaves as
   a plain 0 in every operation.
 - **Extensible.** `Define` registers a new unit against a kind; a symbol may not

@@ -231,23 +231,84 @@ func isFinite(x float64) bool { return !math.IsInf(x, 0) && !math.IsNaN(x) }
 // The three helpers below are how every operation on a [Value] does its
 // arithmetic, and no operation may bypass them by forming a base magnitude
 // ([Value.Base], a magnitude times its unit's factor) as an intermediate: that
-// product overflows for an ordinary operand such as [Meters](1e307), even where
-// the operation's own result is perfectly representable.
+// product overflows for an ordinary operand such as [Meters](1e307), and
+// underflows for one such as [Grams](1e-322), even where the operation's own
+// result is perfectly representable.
 //
 // Each splits its operands with [math.Frexp] into a mantissa in [0.5, 1) and a
 // binary exponent, combines the mantissas — a bounded handful of them, so their
-// product can neither overflow nor underflow — sums the exponents as ints, and
-// reassembles once with [math.Ldexp]. Ldexp is the only step that can leave the
-// float64 range, and it does so exactly when the result does. The exponent split
-// is all it is: the mantissas are combined in the same order, and grouped the
-// same way, as the plain arithmetic would combine the operands, so each helper
-// rounds exactly where the plain expression rounds and no conversion pays for
-// the extra range. Mantissas that cancel — the same factor above and below —
+// product can neither overflow nor underflow, and every intermediate keeps its
+// full 53 bits — sums the exponents as ints, and puts the scale back with
+// [math.Ldexp]. Only the last step can leave the float64 range, and it does so
+// exactly when the result does. The mantissas are combined in the same order,
+// and grouped the same way, as the plain arithmetic would combine the operands,
+// so each helper rounds where the plain expression rounds and no conversion pays
+// for the extra range. Mantissas that cancel — the same factor above and below —
 // cancel exactly, so a value divided by itself is exact, and [rescale] returns
 // the magnitude untouched when the two factors are the same.
 //
+// The scale goes back on through [assembleMul] and [assembleDiv], never a bare
+// Ldexp of the fully combined mantissa: rounding the combined mantissa to 53
+// bits and then rounding again into the subnormal range is a double rounding,
+// and it is worse than the plain expression exactly where the plain expression
+// still works — [Scalar](1.25) divided by [Centimeters](1e307) is 1.25e-308, not
+// a bit less. The assemblers put the two sides back at their own scales, so the
+// last operation rounds once, into whatever range the result lands in.
+//
 // An infinity or a NaN operand survives Frexp unchanged and propagates as it
 // would have through the plain arithmetic, so Inf × 0 is still a NaN.
+
+// smallestNormal is the smallest positive normal float64, 2⁻¹⁰²². Below it a
+// float64 has fewer than 53 bits of significand, so a value that lands there has
+// been rounded a second time.
+const smallestNormal = 2.2250738585072014e-308
+
+// roundedTwice reports whether p — a result formed as Ldexp(mantissa, e), where
+// the mantissa was already rounded to 53 bits — has been rounded again. That is
+// so exactly when it lands in the subnormal range, zero included: the true
+// result may be a nonzero subnormal that a first rounding pushed onto the wrong
+// side of a tie, or off the bottom of the range entirely.
+func roundedTwice(p float64) bool {
+	return math.Abs(p) < smallestNormal // false for an infinity and for a NaN
+}
+
+// assembleMul returns x × y × 2ᵉ, with x and y mantissa-scale (in [0.25, 1] in
+// magnitude, or zero) and each already carrying its full significand.
+//
+// The straight Ldexp of x × y is exact whenever the result is normal: the
+// product rounds once, and scaling by a power of two is then lossless. A
+// subnormal result is where that stops being true — Ldexp would round the
+// already-rounded product a second time — so the scale goes back onto the two
+// sides instead, splitting the exponent between them, and the multiplication
+// that follows rounds once, straight into the range the result belongs in.
+func assembleMul(x, y float64, e int) float64 {
+	p := math.Ldexp(x*y, e)
+	if !roundedTwice(p) || x == 0 || y == 0 {
+		return p
+	}
+	// Half the exponent on each side. A mantissa is within two powers of two of
+	// 1 and a subnormal result puts e near −1022, so both halves stay well inside
+	// the normal range, both Ldexps are exact, and the product is correctly
+	// rounded. An e low enough to push a half out of that range is one whose true
+	// result is orders of magnitude below the smallest subnormal, and it is zero
+	// whichever way it is assembled.
+	h := e / 2
+	return math.Ldexp(x, h) * math.Ldexp(y, e-h)
+}
+
+// assembleDiv returns x ÷ y × 2ᵉ, under the same rule as [assembleMul]: exact
+// while the quotient is normal, and split across numerator and denominator where
+// it is subnormal — the numerator scaled down by half the exponent and the
+// denominator up by the other half — so that the division rounds once rather
+// than twice.
+func assembleDiv(x, y float64, e int) float64 {
+	q := math.Ldexp(x/y, e)
+	if !roundedTwice(q) || x == 0 || y == 0 {
+		return q
+	}
+	h := e / 2
+	return math.Ldexp(x, h) / math.Ldexp(y, h-e)
+}
 
 // rescale returns m × (from / to): a magnitude carried in a unit of factor from,
 // expressed in a unit of factor to. from == to returns m exactly, so a value is
@@ -263,7 +324,7 @@ func rescale(m, from, to float64) float64 {
 	fm, em := math.Frexp(m)
 	ffrom, efrom := math.Frexp(from)
 	fto, eto := math.Frexp(to)
-	return math.Ldexp(fm*ffrom/fto, em+efrom-eto)
+	return assembleDiv(fm*ffrom, fto, em+efrom-eto)
 }
 
 // product returns (a × af) × (b × bf): two magnitudes multiplied in base units.
@@ -274,7 +335,7 @@ func product(a, af, b, bf float64) float64 {
 	faf, eaf := math.Frexp(af)
 	fb, eb := math.Frexp(b)
 	fbf, ebf := math.Frexp(bf)
-	return math.Ldexp((fa*faf)*(fb*fbf), ea+eaf+eb+ebf)
+	return assembleMul(fa*faf, fb*fbf, ea+eaf+eb+ebf)
 }
 
 // quotient returns (a × af) ÷ (b × bf): two magnitudes divided in base units.
@@ -283,7 +344,7 @@ func quotient(a, af, b, bf float64) float64 {
 	faf, eaf := math.Frexp(af)
 	fb, eb := math.Frexp(b)
 	fbf, ebf := math.Frexp(bf)
-	return math.Ldexp((fa*faf)/(fb*fbf), ea+eaf-eb-ebf)
+	return assembleDiv(fa*faf, fb*fbf, ea+eaf-eb-ebf)
 }
 
 // Scale returns v multiplied by a dimensionless factor. It reports no error, so

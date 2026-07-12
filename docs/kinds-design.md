@@ -35,9 +35,11 @@ division subtracts them, and every derived quantity falls out for free.
 // Kind is the physical dimension of a quantity: the exponents of the base
 // dimensions it is built from. The zero value is Dimensionless.
 //
-// Kind is comparable: two kinds are equal exactly when their exponents match.
+// Kind is comparable: two kinds are equal exactly when their exponents match and
+// neither has overflowed.
 type Kind struct {
     l, m, a int8 // length, mass, angle
+    ovf     bool // an exponent saturated; sticky (see §4)
 }
 ```
 
@@ -50,9 +52,10 @@ Three base dimensions, because three is what this domain needs:
 | **Angle** (`a`) | **see below — this one is a judgment call, not physics** |
 
 There is no time, current, or temperature. This is a geometry library; a
-quantity that needs seconds does not belong in it. Exponents are `int8` —
-`L⁴` is as exotic as it gets, and the whole `Kind` stays 3 bytes and comparable
-with `==`.
+quantity that needs seconds does not belong in it. Exponents are `int8` — `L⁴` is
+as exotic as it gets — so the whole `Kind` stays a handful of bytes and comparable
+with `==`, and it carries one bit besides the exponents: the overflow mark, which
+§4 explains.
 
 ### Angle is tracked, though physics says it is dimensionless
 
@@ -174,11 +177,11 @@ units.Meters(1e307).Equal(units.Meters(1e307), 1e-9)  // true
 So **no operation forms a base magnitude.** Every one routes its arithmetic
 through the three helpers in `value.go` — `rescale`, `product`, `quotient` — which
 split their operands with `math.Frexp`, combine the mantissas (a bounded handful,
-so their product can neither overflow nor underflow), sum the binary exponents as
-`int`s, and reassemble once with `math.Ldexp`. `Ldexp` is the only step that can
-leave the float64 range, and it does so exactly when the result does. A new
-operation gets this by using the helpers; reaching for `Base()` instead is how the
-bug comes back.
+so their product can neither overflow nor underflow, and every intermediate keeps
+its full 53 bits), sum the binary exponents as `int`s, and put the scale back with
+`math.Ldexp`. Only that last step can leave the float64 range, and it does so
+exactly when the result does. A new operation gets this by using the helpers;
+reaching for `Base()` instead is how the bug comes back.
 
 **The range is free.** The exponent split is *all* the helpers do: the mantissas
 are combined in the same order, and grouped the same way, as the plain
@@ -188,10 +191,39 @@ an ulp for the extra range. `25.4 mm` is exactly `1 in`, and `1000 g/cm³` exact
 `1e6 kg/m³`. Factors that cancel — the same factor above and below — cancel
 *exactly*, so a value divided by itself is exact, and `rescale` returns the
 magnitude untouched when the two factors are the same, so a conversion into a
-value's own unit is the identity. The test suite pins this down against a
-`big.Rat` oracle: every built-in conversion, product and quotient must land no
-further from the true result than the plain expression it replaced. A tolerance —
-even `1e-9` — is some `10⁷` ulps and would not see a regression of this class.
+value's own unit is the identity.
+
+**And it adds no rounding of its own — the subnormals included.** Putting the
+scale back with a bare `Ldexp` of the fully combined mantissa would round twice:
+once to 53 bits, and once more when `Ldexp` lands in the subnormal range, where a
+float64 has fewer bits to land on. Double-rounded, the helper is *worse* than the
+plain expression it replaced, precisely where the plain expression still works and
+rounds once:
+
+```go
+units.Scalar(1.25).Div(units.Centimeters(1e307))  // 1.25e-308, not 1.2499999999999996e-308
+units.Meters(5e-324).Mul(units.Grams(-2.5))       // -1.5e-323, not -1e-323
+```
+
+So `assembleMul` and `assembleDiv` own that step. While the result is normal, the
+straight `Ldexp` is exact — the last operation rounds once and scaling by a power
+of two is lossless — and that is the path taken. Where the result is subnormal the
+exponent is split across the two sides instead, half each: both sides stay normal,
+so both `Ldexp`s are exact, and the multiplication or division that follows rounds
+**once**, straight into the range the result belongs in. That is the plain
+expression's own rounding wherever the plain expression is usable, and better than
+it wherever the plain expression's intermediates overflow or underflow (which is
+why the scaled path exists at all).
+
+The test suite pins all of this down against a `big.Rat` oracle, with a
+ulp-distance metric: every conversion, product and quotient — over everyday
+magnitudes, and over the extremes (subnormals, `1e307`, `MaxFloat64`, `Define`d
+factors of `1e±300`) — must land no further from the true result than the plain
+expression it replaced, and within two ulps of it. Two ulps and not half of one
+because `(a × af) × (b × bf)` rounds three times whoever computes it; what is
+gated is that the helpers round where the plain expression rounds, and no more
+often. A relative tolerance — even `1e-9` — is some `10⁷` ulps and would not see a
+regression of this class.
 
 `Value.Base()` stays as it is: it is an **accessor**, not an operation. A value
 whose base magnitude genuinely overflows reports `+Inf` there, honestly, and one
@@ -220,10 +252,49 @@ choose — both rescales are the identity, and the final rescale is by that same
 factor whichever unit is named. The suite sweeps every built-in pair of a kind, at
 every tolerance including zero, for exactly this.
 
-Exponents **saturate**, never wrap. `Pow` narrows its multiplier into the `int8`
-range before scaling, so even `Area.Pow(math.MinInt64)` lands on an endpoint of
-the right sign rather than wrapping into a plausible-looking named kind. An
-out-of-range composition is a programming error, and it must look like one.
+### An overflowed exponent is sticky
+
+Exponents **saturate**, never wrap: `Pow` answers an out-of-range multiplier with
+the endpoint the signs point at — even `Area.Pow(math.MinInt64)` — rather than
+letting an `int64` product wrap into a plausible-looking named kind.
+
+Saturating is not enough on its own. A clamped exponent is a **lie about the
+number**: `L¹²⁷` standing in for an exponent of some 9·10¹⁸ is not `L¹²⁷`, and
+arithmetic can walk it back out of the endpoint —
+
+```go
+overflowed := units.Length.Pow(math.MaxInt64)  // saturates to the L¹²⁷ endpoint
+overflowed.Div(units.Length.Pow(126))          // …and back out again: Length?
+```
+
+— handing a CAD consumer an overflowed quantity dressed as an ordinary length,
+with a registered symbol and a nil error. So the saturation is **recorded**, on
+the kind, and it is sticky:
+
+```go
+type Kind struct {
+    l, m, a int8
+    ovf     bool // set when an exponent saturated; never cleared
+}
+```
+
+`Kind` stays comparable and its zero value stays `Dimensionless`. `Mul`, `Div`
+and `Pow` propagate `ovf` from either operand, so nothing composes an overflowed
+kind back into an ordinary one — not even `sat.Div(sat)`, which has zero
+exponents but is still overflow. `Kind.Overflowed()` reports it, and every
+downstream answer follows from the flag alone:
+
+- it is **never equal to a named kind** (that is the whole point);
+- `String()` is `"overflowed"` — the exponents are stand-ins and printing them
+  would state a dimension the kind does not have;
+- `BaseUnit` reports no base unit, and the synthetic unit a value of it carries
+  is `[overflow]` — ASCII, in the reserved bracketed namespace, and resolvable by
+  nothing;
+- `System.UnitFor` hands back that same unit, of that same kind, so presentation
+  cannot turn it into a length or a bare number either.
+
+An out-of-range composition is a programming error, and it must look like one for
+as long as it lives.
 
 ## 5. Units for derived kinds
 
@@ -308,6 +379,10 @@ in brackets — `[L^-1]`, `[L^2*M]`. Two rules keep it honest:
   with `[`, so an application cannot register a unit that a persisted synthetic
   symbol would later resolve to — which would deserialize a value as a *different
   kind*.
+
+An overflowed kind gets `[overflow]` from the same namespace: its exponents are
+clamped stand-ins, so there is no dimension form to write, and the symbol says so
+rather than pretending to `[L^127]`.
 
 **A value of an unnamed kind is a transient intermediate and MUST NOT be
 persisted.** Compose it back into a named kind first. Every kind a consumer

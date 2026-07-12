@@ -73,18 +73,45 @@ func TestKindString(t *testing.T) {
 	}
 }
 
+// namedKinds are the nine kinds the package names and registers a base unit for.
+// A saturated kind must never compare equal to one of them.
+func namedKinds() []units.Kind {
+	return []units.Kind{
+		units.Dimensionless, units.Length, units.Area, units.Volume, units.Angle,
+		units.Mass, units.Density, units.MomentOfInertia, units.SecondMomentOfArea,
+	}
+}
+
+// saturatedHigh and saturatedLow are the endpoint kinds a length composed past
+// the int8 range lands on. They are built by clamping — a Mul or a Div that runs
+// off the end — rather than by an out-of-range Pow, so the Pow table below is
+// compared against something it does not itself produce.
+func saturatedHigh() units.Kind { return units.Length.Pow(127).Mul(units.Length) }
+func saturatedLow() units.Kind  { return units.Length.Pow(-128).Div(units.Length) }
+
 func TestKindExponentBoundary(t *testing.T) {
 	// Exponents are int8: composition saturates at the endpoints rather than
-	// wrapping into a plausible-looking wrong kind.
+	// wrapping into a plausible-looking wrong kind, and a kind that saturated says
+	// so — its exponent is a clamped stand-in, not the number it stands for.
 	hi := units.Length.Pow(127)
-	require.Equal(t, units.Length.Pow(127), hi.Mul(units.Length), "saturated at +127")
+	require.False(t, hi.Overflowed(), "L¹²⁷ is exactly representable")
 	require.Equal(t, "L¹²⁷", hi.String())
 
+	hs := hi.Mul(units.Length)
+	require.True(t, hs.Overflowed(), "L¹²⁸ does not fit: saturated at +127")
+	require.NotEqual(t, hi, hs, "a saturated kind is not the endpoint it clamped to")
+	require.Equal(t, "overflowed", hs.String())
+
 	lo := units.Length.Pow(-128)
-	require.Equal(t, units.Length.Pow(-128), lo.Div(units.Length), "saturated at -128")
+	require.False(t, lo.Overflowed(), "L⁻¹²⁸ is exactly representable")
 	require.Equal(t, "L⁻¹²⁸", lo.String())
 
+	ls := lo.Div(units.Length)
+	require.True(t, ls.Overflowed(), "L⁻¹²⁹ does not fit: saturated at -128")
+	require.NotEqual(t, lo, ls)
+
 	require.NotEqual(t, hi, lo)
+	require.NotEqual(t, hs, ls, "the two endpoints stay distinct once saturated")
 }
 
 func TestKindPowOverflow(t *testing.T) {
@@ -96,20 +123,27 @@ func TestKindPowOverflow(t *testing.T) {
 		got  units.Kind
 		want units.Kind
 	}{
-		{"area^MinInt64", units.Area.Pow(math.MinInt64), units.Length.Pow(-128)},
-		{"area^MaxInt64", units.Area.Pow(math.MaxInt64), units.Length.Pow(127)},
-		{"area^(1<<62)", units.Area.Pow(1 << 62), units.Length.Pow(127)},
-		{"area^-(1<<62)", units.Area.Pow(-(1 << 62)), units.Length.Pow(-128)},
-		{"length^MinInt64", units.Length.Pow(math.MinInt64), units.Length.Pow(-128)},
-		{"length^MaxInt64", units.Length.Pow(math.MaxInt64), units.Length.Pow(127)},
-		{"volume^MaxInt32", units.Volume.Pow(math.MaxInt32), units.Length.Pow(127)},
-		{"angle^MinInt64", units.Angle.Pow(math.MinInt64), units.Angle.Pow(-128)},
-		{"density^MaxInt64", units.Density.Pow(math.MaxInt64), units.Length.Pow(-128).Mul(units.Mass.Pow(127))},
+		{"area^MinInt64", units.Area.Pow(math.MinInt64), saturatedLow()},
+		{"area^MaxInt64", units.Area.Pow(math.MaxInt64), saturatedHigh()},
+		{"area^(1<<62)", units.Area.Pow(1 << 62), saturatedHigh()},
+		{"area^-(1<<62)", units.Area.Pow(-(1 << 62)), saturatedLow()},
+		{"length^MinInt64", units.Length.Pow(math.MinInt64), saturatedLow()},
+		{"length^MaxInt64", units.Length.Pow(math.MaxInt64), saturatedHigh()},
+		{"volume^MaxInt32", units.Volume.Pow(math.MaxInt32), saturatedHigh()},
+		{"angle^MinInt64", units.Angle.Pow(math.MinInt64), units.Angle.Pow(-128).Div(units.Angle)},
+		{"density^MaxInt64", units.Density.Pow(math.MaxInt64), saturatedLow().Mul(units.Mass.Pow(127))},
+		// The exponents that still fit are not overflow, however wide the multiplier
+		// it took to reach them.
+		{"length^127", units.Length.Pow(127), units.Length.Pow(127)},
+		{"length^-128", units.Length.Pow(-128), units.Length.Pow(-128)},
+		{"length^-128 via -(-128)", units.Length.Pow(-1).Pow(128), units.Length.Pow(-128)},
 		// A dimensionless kind has no exponent to scale, so it stays itself.
 		{"dimensionless^MinInt64", units.Dimensionless.Pow(math.MinInt64), units.Dimensionless},
+		{"dimensionless^MaxInt64", units.Dimensionless.Pow(math.MaxInt64), units.Dimensionless},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			require.Equal(t, tc.want, tc.got)
+			require.Equal(t, tc.want.Overflowed(), tc.got.Overflowed())
 		})
 	}
 }
@@ -117,24 +151,96 @@ func TestKindPowOverflow(t *testing.T) {
 func TestKindPowNeverFabricatesANamedKind(t *testing.T) {
 	// The point of saturating: no out-of-range power may quietly produce one of
 	// the named kinds, which would read as a perfectly plausible result.
-	named := []units.Kind{
-		units.Dimensionless, units.Length, units.Area, units.Volume, units.Angle,
-		units.Mass, units.Density, units.MomentOfInertia, units.SecondMomentOfArea,
-	}
 	powers := []int{
 		math.MinInt64, math.MinInt64 + 1, math.MaxInt64, math.MaxInt64 - 1,
 		1 << 62, -(1 << 62), math.MaxInt32, math.MinInt32, 1 << 40, -(1 << 40),
 		128, -129, 1000, -1000,
 	}
-	for _, k := range named {
+	for _, k := range namedKinds() {
 		if k == units.Dimensionless {
 			continue // every power of a dimensionless kind is dimensionless
 		}
 		for _, n := range powers {
 			got := k.Pow(n)
-			for _, want := range named {
+			require.True(t, got.Overflowed(), "%s.Pow(%d) does not fit an int8 exponent", k, n)
+			for _, want := range namedKinds() {
 				require.NotEqual(t, want, got,
 					"%s.Pow(%d) must not fabricate the named kind %s", k, n, want)
+			}
+		}
+	}
+}
+
+// saturate returns every way of driving k out of the int8 exponent range. The
+// exponents that come back are clamped stand-ins for numbers astronomically
+// larger, so the kind is a lie about its dimension — and must never again pass
+// for one that is not.
+func saturate(k units.Kind) map[string]units.Kind {
+	return map[string]units.Kind{
+		"Pow(MaxInt64)": k.Pow(math.MaxInt64),
+		"Pow(MinInt64)": k.Pow(math.MinInt64),
+		"Pow(1<<62)":    k.Pow(1 << 62),
+	}
+}
+
+// ordinaryKinds are the kinds a saturated one is composed with below: the named
+// ones, plus the unnamed kinds a caller reaches by ordinary arithmetic.
+func ordinaryKinds() []units.Kind {
+	return append(namedKinds(),
+		units.Dimensionless.Div(units.Length),         // curvature, L⁻¹
+		units.Mass.Div(units.Area),                    // areal density, L⁻²·M
+		units.Length.Div(units.Angle),                 // L·A⁻¹
+		units.Length.Pow(127),                         // the exponent endpoint itself
+		units.Length.Pow(-128),                        // …and the other one
+		units.Volume.Mul(units.Mass).Mul(units.Angle), // L³·M·A
+		units.Angle.Pow(2),                            // A²
+	)
+}
+
+func TestKindOverflowIsSticky(t *testing.T) {
+	// The reproducer: a saturated L¹²⁷ divided by an L¹²⁶ is not a length. Its
+	// true exponent is astronomical; a Kind that came back Length would hand a
+	// consumer an overflowed quantity dressed as an ordinary one.
+	maxInt := int(^uint(0) >> 1)
+	overflowed := units.Length.Pow(maxInt)
+	require.True(t, overflowed.Overflowed())
+
+	back := overflowed.Div(units.Length.Pow(126))
+	require.True(t, back.Overflowed(), "overflow does not divide away")
+	require.NotEqual(t, units.Length, back, "a saturated exponent must not walk back into a named kind")
+
+	// And no composition of a saturated kind with an ordinary one — in either
+	// direction, or by any power — ever lands on a named kind or loses the flag.
+	for _, k := range namedKinds() {
+		if k == units.Dimensionless {
+			continue // it has no exponent to saturate
+		}
+		for how, sat := range saturate(k) {
+			require.True(t, sat.Overflowed(), "%s.%s saturates", k, how)
+			require.Equal(t, "overflowed", sat.String())
+
+			for _, o := range ordinaryKinds() {
+				for name, got := range map[string]units.Kind{
+					"sat.Mul(o)":        sat.Mul(o),
+					"o.Mul(sat)":        o.Mul(sat),
+					"sat.Div(o)":        sat.Div(o),
+					"o.Div(sat)":        o.Div(sat),
+					"sat.Pow(0)":        sat.Pow(0),
+					"sat.Pow(1)":        sat.Pow(1),
+					"sat.Pow(-1)":       sat.Pow(-1),
+					"sat.Pow(3)":        sat.Pow(3),
+					"sat.Div(sat)":      sat.Div(sat),
+					"sat.Mul(sat)":      sat.Mul(sat),
+					"sat.Div(o).Mul(o)": sat.Div(o).Mul(o),
+				} {
+					require.True(t, got.Overflowed(),
+						"%s.%s: %s must stay overflowed", k, how, name)
+					require.Equal(t, "overflowed", got.String())
+					for _, want := range namedKinds() {
+						require.NotEqual(t, want, got,
+							"%s.%s: %s must not fabricate the named kind %s", k, how, name, want)
+					}
+				}
 			}
 		}
 	}

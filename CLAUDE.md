@@ -52,12 +52,20 @@ It is a **foundation module**: consumed by `github.com/lestrrat-3d/sketch` and
   (a unit factor is positive and finite, so `mag == 0` iff the quantity is zero).
   `Base()` stays a public **accessor** — it may honestly report `+Inf` or `0` —
   and no operation reads it.
-- **The helpers keep the plain expression's rounding.** The `Frexp`/`Ldexp` split
-  buys range, and it MUST NOT be paid for in accuracy: the mantissas are combined
-  in the same order, and grouped the same way, as the plain `mag * from / to` and
-  `(a * af) * (b * bf)` — reassociating them adds a rounding, and `25.4 mm` stops
-  being exactly `1 in`. The suite asserts exactness and a no-worse-than-naive ulp
-  bound against a `big.Rat` oracle; a relative tolerance (even `1e-9`, some `10⁷`
+- **The helpers keep the plain expression's rounding — and add none.** The
+  `Frexp`/`Ldexp` split buys range, and it MUST NOT be paid for in accuracy: the
+  mantissas are combined in the same order, and grouped the same way, as the plain
+  `mag * from / to` and `(a * af) * (b * bf)` — reassociating them adds a rounding,
+  and `25.4 mm` stops being exactly `1 in`. Nor may the scale go back on with a
+  bare `Ldexp` of the combined mantissa: that rounds the mantissa to 53 bits and
+  then rounds **again** into the subnormal range, and a double-rounded result is
+  worse than the plain expression, which rounds once (`Scalar(1.25).Div(
+  Centimeters(1e307))` is `1.25e-308`, not a bit less). `assembleMul`/`assembleDiv`
+  own that step: exact while the result is normal, and split across the two sides
+  where it is subnormal, so the last operation rounds once. The suite asserts
+  exactness and a no-worse-than-naive ulp bound against a `big.Rat` oracle, over
+  the extremes (subnormals, `1e308`, `MaxFloat64`, `Define`d factors of `1e±300`)
+  as well as everyday magnitudes; a relative tolerance (even `1e-9`, some `10⁷`
   ulps) cannot gate this class, so NEVER assert an accuracy claim with one.
 - **NEVER hand back a finite number in a unit it is not in.** `System.In` answers
   in `UnitFor(v.Kind())` — always. A magnitude that unit cannot hold comes back
@@ -73,12 +81,20 @@ It is a **foundation module**: consumed by `github.com/lestrrat-3d/sketch` and
 - **NEVER persist a value of an unnamed kind.** It carries a synthetic,
   unregistered unit (`[L^-1]`) that `Lookup` cannot resolve; it is a transient
   intermediate. Every named kind has a registered base unit — convert first.
+- **An overflowed kind is STICKY.** Exponents are `int8` and saturate rather than
+  wrap, but a saturated exponent is a *lie about the number*, so `Kind` carries an
+  `ovf` flag that `Mul`/`Div`/`Pow` propagate from either operand and nothing ever
+  clears. Without it, `Length.Pow(math.MaxInt64).Div(Length.Pow(126))` would come
+  back as `Length` — an astronomically overflowed quantity wearing a plausible
+  kind. An overflowed kind equals no named kind, prints `overflowed`, has no base
+  unit, and carries the reserved synthetic symbol `[overflow]`. Keep `Kind`
+  comparable and its zero value `Dimensionless`.
 
 ## Layout
 
 | Path | Responsibility |
 |---|---|
-| `kind.go` | `Kind` — dimension exponents, the named kinds, `Mul`/`Div`/`Pow`, `String`. |
+| `kind.go` | `Kind` — dimension exponents, the named kinds, `Mul`/`Div`/`Pow`, `Overflowed`, `String`. |
 | `unit.go` | `Unit`, the built-in unit set, `BaseUnit`, `Define`, `Lookup`, the mutex-guarded registry. |
 | `value.go` | `Value` — magnitude + unit, conversion, arithmetic, formatting. |
 | `system.go` | `System` — the current default units, for presenting base-unit quantities. |
