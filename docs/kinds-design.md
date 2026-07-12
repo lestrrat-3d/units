@@ -485,7 +485,9 @@ than a switch, and returns `(Unit, bool)` — an unnamed kind like `L⁻¹` has 
 base unit registered, and fabricating one would be a lie. The `bool` is the
 honest part: the function has an answer it cannot always give.
 
-Unit symbols are ASCII, with a caret for an exponent. `Kind.String()` — Unicode
+Unit symbols are ASCII, with a caret for an exponent, and carry **no whitespace**:
+`Define` panics on a symbol holding any (§6 — it is the text form's separator, so
+such a symbol could be written and never read). `Kind.String()` — Unicode
 superscripts, `L⁻¹`, and English names for named kinds — is **display text and
 never a unit symbol**.
 
@@ -587,6 +589,34 @@ is `v`: the same unit, and the same `math.Float64bits`, subnormals and
 `MaxFloat64` included. It cannot be otherwise. This library holds that `25.4 mm`
 is *exactly* `1 in`; a text form that lost a bit would give that up at the one
 boundary where the quantity leaves the process.
+
+### A registered symbol is a readable symbol
+
+The symbol grammar and the text grammar are **one grammar**, and they are made to agree
+at the one place a symbol enters the registry: **`Define`**. The form separates the
+magnitude from the symbol with a space, so a symbol carrying whitespace is one
+`MarshalText` could write and `UnmarshalText` could never read —
+
+```go
+units.Define("probe space", units.Length, 7)  // panics: the text parser cannot read it back
+```
+
+— because `"3 probe space"` cuts into the magnitude `3` and *two tokens*, which is not a
+symbol. `Define` panics on any `unicode.IsSpace` rune (a space, a tab, a newline, a
+carriage return, a vertical tab, a form feed, and the Unicode ones — NEL, NBSP, the
+ideographic space) and registers nothing, as it does for a duplicate symbol, a reserved
+`[` prefix, an overflowed kind or an unusable factor. The whole class is refused and not
+the ASCII space alone: whitespace is what separates the two halves of the form, and a
+symbol must be **one token** of it.
+
+`One`'s **empty** symbol is the one symbol with no separator — a dimensionless value is
+the bare number — and it stays `One`'s: `Define("")` collides with the registered symbol
+and panics like any other duplicate.
+
+The invariant is enforced at **registration**, not at marshalling, and that is what makes
+the marshaller's guard sound: an unparseable symbol is *unregistrable*, so a `Lookup` that
+resolves a value's unit proves the round trip works. Guarding in `MarshalText` instead
+would leave the registry holding a symbol no document could carry.
 
 **A symbol this package emits is a symbol it can read — the check is `Lookup`
 itself.** Three values have no text form, and each is an **error** rather than a

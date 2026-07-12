@@ -119,6 +119,12 @@ var ErrUnknownUnit = errors.New("units: unknown unit symbol")
 // to be. The library holds that 25.4 mm is exactly 1 in, and a text form that lost a
 // bit would give that up at the document boundary.
 //
+// And every registered symbol is one this parser can read: the separator is a space, so
+// [Define] panics on a symbol carrying whitespace and the registry never holds one. The
+// two halves of the form are the same grammar — a symbol that could be written and not
+// read is unregistrable — which is why [Lookup] resolving a unit is all
+// [Value.MarshalText] checks.
+//
 // Three values have no text form, and each is an error rather than a symbol that could
 // never be read back: one of an unnamed kind ([ErrUnnamedKind]), one whose kind has
 // overflowed ([ErrOverflowedKind]), and one whose magnitude is not finite
@@ -685,6 +691,11 @@ func (v Value) String() string {
 // [Value.UnmarshalText], which reads exactly what this writes, and the text form
 // described on [Value].
 //
+// It never writes a text [Value.UnmarshalText] cannot read back, and it needs only the
+// registry to know it: [Define] rejects every symbol the parser cannot read — one
+// carrying whitespace, which is the form's separator — so a registered symbol is a
+// readable symbol, and a [Lookup] that resolves the value's unit is the whole guard.
+//
 // It reports an error rather than write a text that cannot be read back:
 //
 //   - [ErrOverflowedKind], for a value whose kind has overflowed ([Kind.Overflowed]):
@@ -703,6 +714,13 @@ func (v Value) MarshalText() ([]byte, error) {
 	if u.kind.Overflowed() {
 		return nil, fmt.Errorf("%w: %s carries the reserved symbol %q", ErrOverflowedKind, v, u.symbol)
 	}
+
+	// Lookup is sufficient, and no separate check of the symbol's shape is needed:
+	// [Define] admits no symbol UnmarshalText cannot read (see [hasWhitespace]), so the
+	// registry holds only readable symbols — the empty one of [One], whose value is the
+	// bare magnitude, included. The unit must be the registered one and not merely share
+	// its symbol: a synthetic unit of an unnamed kind carries a bracketed symbol, which
+	// is registered by nothing.
 	if r, ok := Lookup(u.symbol); !ok || r != u {
 		return nil, fmt.Errorf("%w: a %s carries the unregistered symbol %q", ErrUnnamedKind, u.kind, u.symbol)
 	}

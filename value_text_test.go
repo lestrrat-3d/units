@@ -8,6 +8,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"unicode"
 
 	"github.com/lestrrat-3d/units"
 	"github.com/stretchr/testify/require"
@@ -536,6 +537,164 @@ func TestValueTextDefinedUnits(t *testing.T) {
 	require.Equal(t, furlong, v.Unit())
 	sameFloat64f(t, 3, v.Mag(), "3 furlong")
 	sameFloat64f(t, 603504, v.Base(), "3 furlong in mm")
+}
+
+func TestDefineRejectsUnreadableSymbol(t *testing.T) {
+	// The text form is "<magnitude> <symbol>", separated by a space, so a symbol carrying
+	// whitespace is one MarshalText could write and UnmarshalText could never read. The
+	// grammar is enforced where a symbol enters the registry: Define panics, and registers
+	// nothing, so a symbol Lookup resolves is a symbol the parser reads back.
+	for _, tc := range []struct{ name, symbol string }{
+		{"a space", "probe space"},
+		{"a leading space", " probe"},
+		{"a trailing space", "probe "},
+		{"only a space", " "},
+		{"only whitespace", " \t\n"},
+		{"a tab", "zz\tunit"},
+		{"a newline", "zz\nunit"},
+		{"a carriage return", "zz\runit"},
+		{"a vertical tab", "zz\vunit"},
+		{"a form feed", "zz\funit"},
+		{"a next line (U+0085)", "zz\u0085unit"},
+		{"a non-breaking space (U+00A0)", "zz\u00a0unit"},
+		{"an ogham space mark (U+1680)", "zz\u1680unit"},
+		{"a line separator (U+2028)", "zz\u2028unit"},
+		{"an em space (U+2003)", "zz\u2003unit"},
+		{"an ideographic space (U+3000)", "zz\u3000unit"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			require.True(t, strings.ContainsFunc(tc.symbol, unicode.IsSpace), "the premise: it carries whitespace")
+
+			require.Panics(t, func() { units.Define(tc.symbol, units.Length, 7) },
+				"a symbol the text parser cannot read must not be registrable")
+			_, ok := units.Lookup(tc.symbol)
+			require.False(t, ok, "a rejected symbol must not be registered")
+		})
+	}
+
+	// The reproducer. Were "probe space" registrable, MarshalText would write "3 probe
+	// space" with a nil error and UnmarshalText could not read it back: the parser cuts at
+	// the first space and what follows is two tokens, not a symbol. It is unregistrable, so
+	// no value carries it — and the text nothing wrote is malformed, as it always was.
+	require.ErrorIs(t, new(units.Value).UnmarshalText([]byte("3 probe space")), units.ErrMalformedText)
+
+	// The empty symbol is One's, and it stays One's: Define collides with it, and the
+	// dimensionless bare-number form still writes and reads.
+	require.Panics(t, func() { units.Define("", units.Length, 7) }, "the empty symbol is One's")
+	one, ok := units.Lookup("")
+	require.True(t, ok, "One's empty symbol is registered")
+	require.Equal(t, units.One, one)
+	requireTextRoundTrip(t, units.Scalar(1.5))
+	requireTextRoundTrip(t, units.Scalar(0))
+}
+
+// hostileSymbolRunes are what a generated symbol is built from: the characters real
+// symbols are made of (letters, digits, carets, slashes, asterisks), the brackets of the
+// reserved namespace, the punctuation an application might reach for, Unicode, and every
+// class of whitespace the text grammar could trip over.
+var hostileSymbolRunes = []rune("aBcXyZ019^*/+-_.:,;%'\"()[]{}<>#&|\\?!$=@`µΩ°²³πÅ日\t\n\r\v\f \u0085\u00a0\u1680\u2003\u2028\u3000")
+
+// hostileSymbols generates n plausible-but-hostile symbols. It names no expectation:
+// Define decides which of them are registrable, and the property below is asserted over
+// whatever it accepts — which is the assertion a suite of hand-picked *safe* symbols
+// cannot make.
+//
+// Each carries a "~" and its index, so a generated symbol collides with nothing else the
+// suite registers, or asserts is unregistered; the hostility is in everything around it.
+func hostileSymbols(n int) []string {
+	r := rand.New(rand.NewPCG(0xba5e, 0x5717b0))
+	pick := func(length int) string {
+		var b strings.Builder
+		for range length {
+			b.WriteRune(hostileSymbolRunes[r.IntN(len(hostileSymbolRunes))])
+		}
+		return b.String()
+	}
+
+	seen := map[string]struct{}{}
+	symbols := make([]string, 0, n)
+	for i := range n {
+		length := 8
+		if i%16 == 0 {
+			length = 64 // a long symbol, too
+		}
+
+		// The marker sits at a random place in the junk, so a hostile rune — a space, a
+		// bracket — lands at the front and at the back as often as it lands in the middle.
+		head := r.IntN(length + 1)
+		symbol := pick(head) + "~" + strconv.Itoa(i) + pick(length-head)
+		if _, dup := seen[symbol]; dup {
+			continue
+		}
+		seen[symbol] = struct{}{}
+		symbols = append(symbols, symbol)
+	}
+	return symbols
+}
+
+// tryDefine registers symbol, reporting whether Define accepted it. Define panics on a
+// symbol it refuses, and the property is about what it accepts, so the panic is caught
+// rather than provoked.
+func tryDefine(symbol string, kind units.Kind, factor float64) (units.Unit, bool) {
+	var u units.Unit
+	ok := false
+	func() {
+		defer func() { _ = recover() }()
+		u = units.Define(symbol, kind, factor)
+		ok = true
+	}()
+	return u, ok
+}
+
+func TestValueTextRoundTripOverHostileSymbols(t *testing.T) {
+	// The property, not the instance: for every symbol Define accepts, what MarshalText
+	// writes UnmarshalText reads back — the same unit, and the same magnitude bit for bit.
+	// The two grammars are one grammar, and Define is where they are made to agree, so the
+	// symbols here are the ones a hand-written table would not have thought of.
+	accepted, rejected := 0, 0
+	for _, symbol := range hostileSymbols(4000) {
+		if _, taken := units.Lookup(symbol); taken {
+			continue // already a unit; Define would panic on the duplicate, which is not the property
+		}
+
+		u, ok := tryDefine(symbol, units.Length, 3)
+		if !ok {
+			rejected++
+			// A refusal registers nothing, and only an unreadable symbol (whitespace) or a
+			// reserved one (the "[" namespace) is refused — the factor and the kind are fine.
+			_, found := units.Lookup(symbol)
+			require.False(t, found, "a rejected symbol %q must not be registered", symbol)
+			require.True(t,
+				strings.ContainsFunc(symbol, unicode.IsSpace) || strings.HasPrefix(symbol, "["),
+				"%q is neither unreadable nor reserved, so Define must accept it", symbol)
+			continue
+		}
+
+		accepted++
+		require.Equal(t, symbol, u.Symbol())
+		require.False(t, strings.ContainsFunc(symbol, unicode.IsSpace), "an accepted symbol carries no whitespace")
+
+		for _, m := range []float64{0, math.Copysign(0, -1), 1, -2.5, math.Pi, 1e307, math.MaxFloat64, 5e-324} {
+			v := units.New(m, u)
+
+			text, err := v.MarshalText()
+			require.NoError(t, err)
+			require.Equal(t, strconv.FormatFloat(v.Mag(), 'g', -1, 64)+" "+symbol, string(text),
+				"the text is the magnitude, a space, and the symbol")
+
+			// The symbol survives the separator whole: the parser's cut lands on the space
+			// MarshalText wrote and nowhere else.
+			_, after, found := strings.Cut(string(text), " ")
+			require.True(t, found)
+			require.Equal(t, symbol, after, "%q carries the symbol as written", text)
+
+			requireTextRoundTrip(t, v)
+		}
+	}
+
+	// The generator must actually exercise both sides of Define's judgment.
+	require.Greater(t, accepted, 100, "the sweep must register real units")
+	require.Greater(t, rejected, 100, "…and must offer Define symbols it has to refuse")
 }
 
 func TestValueTextPreservesTheQuantity(t *testing.T) {

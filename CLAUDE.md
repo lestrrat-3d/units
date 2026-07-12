@@ -162,8 +162,20 @@ It is a **foundation module**: consumed by `github.com/lestrrat-3d/sketch` and
     `MaxFloat64`, both zeros) **and** over 200k random bit patterns. NEVER "improve"
     the formatting to a fixed precision — that is a lost bit, which is a lost
     guarantee.
+  - **A registered symbol is a readable symbol — enforced at `Define`.** The symbol
+    grammar and the text grammar are the same grammar: the form separates the magnitude
+    from the symbol with a **space**, so a symbol carrying whitespace could be written
+    and never read (`"3 probe space"` cuts into a magnitude and two tokens). `Define`
+    therefore **panics** on a symbol holding any `unicode.IsSpace` rune — space, tab,
+    newline, CR, VT, FF, NEL, NBSP, the ideographic space — and registers nothing, as it
+    does for a duplicate symbol, a reserved `[` prefix, an overflowed kind or an unusable
+    factor. `One`'s **empty** symbol is the one symbol with no separator, and it stays
+    `One`'s: `Define("")` collides with it. NEVER patch this in `MarshalText` instead —
+    the invariant is that an unparseable symbol is **unregistrable**, which is what makes
+    `Lookup` a sufficient guard.
   - **NEVER emit a symbol that cannot be read back.** The marshaller's check *is*
-    `Lookup`. A value of an **unnamed kind** (synthetic `[L^-1]`) is
+    `Lookup` — and `Lookup` is *enough*, because registered means readable (above). A
+    value of an **unnamed kind** (synthetic `[L^-1]`) is
     `ErrUnnamedKind`, and one of an **overflowed kind** (`[overflow]`) is
     `ErrOverflowedKind` — the "must not be persisted" rule, enforced at the one place
     it would have been broken. A **non-finite** magnitude — `New` and friends can
@@ -209,8 +221,9 @@ It is a **foundation module**: consumed by `github.com/lestrrat-3d/sketch` and
   `testify/require` (never `assert`), external `units_test` package.
 - Docs state **current state only** — no changelogs, no "was X, now Y".
 - **Unit symbols are ASCII**, with a caret for an exponent: `mm^2`, `in^3`,
-  `kg/m^3`. `Kind.String()` is the one place Unicode superscripts appear (`L⁻¹`),
-  and it is display text, never a unit symbol or a registry key.
+  `kg/m^3`, and **never any whitespace** (`Define` panics on one — it is the text
+  form's separator). `Kind.String()` is the one place Unicode superscripts appear
+  (`L⁻¹`), and it is display text, never a unit symbol or a registry key.
 - **`[…]` is a reserved symbol namespace.** The synthetic unit a value of an
   unnamed kind carries is `Kind.canonicalSymbol()` (`[L^-1]`, `[L^2*M]`, ASCII,
   order L·M·A). `Define` panics on a symbol opening with `[`.

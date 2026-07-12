@@ -5,6 +5,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"unicode"
 )
 
 // Unit is a unit of measure. Units are values, compared by identity of their
@@ -16,6 +17,10 @@ import (
 // "mm^2" is the square millimetre, "kg/mm^3" the kilogram per cubic millimetre.
 // A symbol opening with "[" is reserved for the library's synthetic units (see
 // [Define]).
+//
+// A registered symbol carries no whitespace, so it is a symbol the text form can read
+// back: [Define] rejects one that [Value.UnmarshalText] could not parse. [One]'s symbol
+// is the empty one, and a dimensionless value is written as the bare magnitude.
 //
 // Every unit's factor is positive and finite ([Define] rejects anything else),
 // so a conversion through a unit is always well defined. The zero Unit is [One]:
@@ -152,7 +157,30 @@ func baseUnitFor(k Kind) Unit {
 	return Unit{symbol: k.canonicalSymbol(), kind: k, factor: 1}
 }
 
+// hasWhitespace reports whether symbol carries a rune the text form cannot carry:
+// any whitespace ([unicode.IsSpace]) — the ASCII space, a tab, a newline, a carriage
+// return, a vertical tab, a form feed, and the Unicode ones (NEL, NBSP, the ideographic
+// space) besides.
+//
+// It is read straight off [Value.UnmarshalText]'s grammar. A value's text is
+// "<magnitude> <symbol>", and the parser cuts it at the first ASCII space:
+// [strconv.FormatFloat] never writes a space, so the cut lands on the separator, and
+// everything after it is the symbol — which the parser then refuses if it holds a space
+// of its own. So a symbol containing a space is a symbol [Value.MarshalText] can write
+// and nothing can read: "probe space" comes back as two tokens, not a unit.
+//
+// The whole whitespace class is rejected and not the ASCII space alone. Whitespace is
+// what separates a magnitude from its symbol in this form, and a symbol must be one
+// token of it — a symbol that another whitespace rune could split, or that a document
+// could trim, is not one this form can promise to carry back.
+func hasWhitespace(symbol string) bool {
+	return strings.IndexFunc(symbol, unicode.IsSpace) >= 0
+}
+
 func define(symbol string, kind Kind, factor float64) Unit {
+	if hasWhitespace(symbol) {
+		panic("units: unit symbol must not contain whitespace: " + strconv.Quote(symbol))
+	}
 	if strings.HasPrefix(symbol, "[") {
 		panic("units: unit symbol namespace is reserved: " + strconv.Quote(symbol))
 	}
@@ -183,6 +211,21 @@ func defineBase(symbol string, kind Kind) Unit {
 // Define registers and returns a new unit measuring kind, whose magnitudes
 // convert to the kind's base unit by multiplying by factorToBase. It enables
 // callers to extend the built-in set (e.g. a "yard").
+//
+// # Every registered symbol is one the text form can read back
+//
+// The symbol must hold no whitespace — no space, tab, newline, carriage return,
+// vertical tab, form feed, or any other [unicode.IsSpace] rune: Define panics on one,
+// and the empty symbol, which is [One]'s, is registered already. That is the text
+// grammar, enforced where a symbol enters the registry rather than where one is
+// written. [Value.MarshalText] renders a value as "<magnitude> <symbol>" and
+// [Value.UnmarshalText] cuts the text at the first space, so a symbol carrying one
+// could be written and never read: "3 probe space" is a magnitude and two tokens, and
+// the value is lost at the document boundary.
+//
+// So a symbol [Lookup] resolves is a symbol [Value.UnmarshalText] can read, and
+// MarshalText's [Lookup] guard is the whole of what it needs: registered means
+// readable, by construction.
 //
 // The symbol must be unique: Define panics if it is already registered.
 // Redefining a symbol would change the meaning of every value that names it,
