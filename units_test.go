@@ -2194,3 +2194,255 @@ func TestAddSubKeepsCancellation(t *testing.T) {
 		}
 	})
 }
+
+// equalOracle decides a.Equal(b, tol) from the definition, in exact rationals:
+// the two are equal exactly when the true difference of their base magnitudes is
+// within tol. It is computed from the operands' own magnitudes and factors, never
+// from an expression in the code under test, so it sees a difference that no
+// float64 arithmetic on the way to the answer could have kept — one of 1e-300 mm,
+// say, which a rescale into a unit of factor 1e300 underflows to zero.
+func equalOracle(t *testing.T, a, b units.Value, tol float64) bool {
+	t.Helper()
+
+	if a.Kind() != b.Kind() {
+		return false
+	}
+	d := new(big.Rat).Sub(baseRat(t, a), baseRat(t, b))
+	return d.Abs(d).Cmp(ratOf(t, tol)) <= 0
+}
+
+// equalSweepUnits are the units of a kind the difference sweep runs over: the
+// built-ins, plus — for a length — the application-defined factors of 1e±300, so
+// the two operands' factors can be 600 decades apart and a rescale between them
+// has the whole range to lose a difference in.
+func equalSweepUnits(k units.Kind) []units.Unit {
+	u := unitsOfKind(k)
+	if k == units.Length {
+		u = append(u, hugeLength, tinyLength)
+	}
+	return u
+}
+
+// equalSweepMags are the magnitudes the difference sweep runs over: both zeros,
+// the subnormals, the everyday numbers, and the top of the range.
+func equalSweepMags() []float64 {
+	return []float64{
+		0, math.Copysign(0, -1),
+		5e-324, 1e-320, 1e-300,
+		1, -2.5, 25.4, math.Pi, 1000,
+		1e300, 1e307, math.MaxFloat64,
+	}
+}
+
+// equalSweepTols are the tolerances it is judged at: exact equality, tolerances
+// down among the subnormals — where a difference a rescale erases still lives —
+// and the ones a caller would actually pass. They are absolute, in the kind's base
+// unit, and fixed here: a tolerance derived from the code under test could swallow
+// the very disagreement it is meant to catch.
+func equalSweepTols() []float64 {
+	return []float64{0, 5e-324, 1e-320, 1e-300, 1e-12, 1e-9, 1, 1e300}
+}
+
+// equalSweepKinds are the kinds swept: every kind with more than one unit, so
+// there is a pair of factors to lose a difference between.
+func equalSweepKinds() []units.Kind {
+	return []units.Kind{
+		units.Length, units.Angle, units.Mass, units.Area, units.Volume, units.Density, units.Dimensionless,
+	}
+}
+
+// nearestIn returns the magnitude in u that comes nearest v's quantity: v's true
+// base magnitude divided by u's factor, rounded once. It is where a difference is
+// finest — v and New(nearestIn(v, u), u) are one rounding apart, so their true
+// difference is nonzero and minuscule, exactly the difference a rescale into the
+// coarser of the two units underflows to nothing — and its mirror, a true
+// difference of zero that a rescale would inflate, is the same construction
+// wherever that rounding happens to be exact.
+//
+// It is computed in exact rationals, not by the conversion under test.
+func nearestIn(t *testing.T, v units.Value, u units.Unit) (float64, bool) {
+	t.Helper()
+
+	m := nearest(new(big.Rat).Quo(baseRat(t, v), ratOf(t, u.Factor())))
+	if math.IsInf(m, 0) {
+		return 0, false // v has no rendering in u; there is no pair to judge
+	}
+	return m, true
+}
+
+func TestEqualDecidesOnTheTrueDifference(t *testing.T) {
+	// Equal answers on the true difference of the two quantities, never on a
+	// rounding of it. Rescaling both operands into a common unit and subtracting
+	// there is a composition, and the rounding in between is one the comparison never
+	// authorised: it can erase a difference entirely, and then report two quantities
+	// that genuinely differ as equal at a tolerance of zero.
+
+	t.Run("a difference a rescale would erase", func(t *testing.T) {
+		// 1e-300 mm against zero of a unit whose factor is 1e300. The true difference
+		// is 1e-300 mm — an ordinary number, which float64 holds without difficulty —
+		// but 1e-300 mm rescaled into that unit underflows to 0, and a predicate that
+		// subtracts after the rescale has nothing left to compare.
+		tiny := units.Millimeters(1e-300)
+		for _, z := range []units.Value{
+			units.New(math.Copysign(0, -1), hugeLength), // the reproducer's negative zero…
+			units.New(0, hugeLength),                    // …and an ordinary one
+		} {
+			require.False(t, tiny.Equal(z, 0), "%s is not %s: they differ by 1e-300 mm", tiny, z)
+			require.False(t, z.Equal(tiny, 0), "…nor the other way round")
+			require.True(t, tiny.Equal(z, 1e-300), "…and they are equal at a tolerance that admits the difference")
+			require.True(t, z.Equal(tiny, 1e-300), "…in either order")
+		}
+
+		// The same erasure with ordinary magnitudes on both sides and no zero in
+		// sight: 1e-300 of the 1e300 unit is all but exactly 1 mm — the two factors
+		// are rounded float64s, so the quantities differ — and 1 mm rescaled into the
+		// 1e300 unit rounds to precisely that magnitude, leaving a difference of zero.
+		a, b := units.Millimeters(1), units.New(1e-300, hugeLength)
+		require.NotEqual(t, 0, new(big.Rat).Sub(baseRat(t, a), baseRat(t, b)).Sign(),
+			"the premise: the two quantities genuinely differ")
+		require.False(t, a.Equal(b, 0), "%s is not exactly %s", a, b)
+		require.False(t, b.Equal(a, 0), "…nor the other way round")
+		require.True(t, a.Equal(b, 1e-9), "…while a tolerance a caller would pass finds them equal")
+		require.True(t, b.Equal(a, 1e-9), "…in either order")
+
+		// And its mirror at the bottom of the range: the smallest subnormal in the
+		// 1e-300 unit is 5e-624 mm, a quantity no float64 holds. It is not zero, and
+		// it is not the same quantity as the smallest subnormal millimetre.
+		sub := units.New(5e-324, tinyLength)
+		require.False(t, sub.Equal(units.Millimeters(0), 0), "%s is not zero", sub)
+		require.False(t, units.Millimeters(0).Equal(sub, 0), "…nor the other way round")
+		require.False(t, sub.Equal(units.Millimeters(5e-324), 0), "…and it is not 5e-324 mm either")
+		require.True(t, sub.Equal(units.Millimeters(0), 5e-324), "…though a tolerance of one subnormal admits it")
+	})
+
+	t.Run("against the exact difference", func(t *testing.T) {
+		// The sweep: every same-kind pair of units, the Defined factors of 1e±300
+		// included, with the second operand chosen so that the two quantities are as
+		// near as the units allow — one rounding apart, or exactly the same quantity.
+		// That is where a rescale destroys the difference, and where the answer at a
+		// tolerance of zero is decided. Every point is judged against the exact
+		// rational difference.
+		leaks := 0
+		check := func(a, b units.Value, tol float64) {
+			want := equalOracle(t, a, b, tol)
+			got, swapped := a.Equal(b, tol), b.Equal(a, tol)
+			if got == want && swapped == want {
+				return
+			}
+			leaks++
+			if leaks <= 10 {
+				t.Errorf("Equal(%s, %s, %v) = %v, %v; the true difference says %v",
+					a, b, tol, got, swapped, want)
+			}
+		}
+
+		for _, k := range equalSweepKinds() {
+			for _, ua := range equalSweepUnits(k) {
+				for _, ub := range equalSweepUnits(k) {
+					for _, ma := range equalSweepMags() {
+						a := units.New(ma, ua)
+
+						mbs := []float64{ma, 0, math.Copysign(0, -1)}
+						if mb, ok := nearestIn(t, a, ub); ok {
+							mbs = append(mbs,
+								mb,
+								math.Nextafter(mb, math.Inf(1)),
+								math.Nextafter(mb, math.Inf(-1)),
+								mb*0.5,
+							)
+						}
+
+						for _, mb := range mbs {
+							if math.IsInf(mb, 0) {
+								continue // the neighbour of the last float64 is not one
+							}
+							b := units.New(mb, ub)
+							for _, tol := range equalSweepTols() {
+								check(a, b, tol)
+							}
+						}
+					}
+				}
+			}
+		}
+		require.Zero(t, leaks, "%d pairs where Equal disagreed with the true difference", leaks)
+	})
+
+	t.Run("symmetry", func(t *testing.T) {
+		// Every pair, every magnitude, every tolerance — zero included. An equality
+		// predicate whose answer depends on which operand is the receiver is broken
+		// whichever answer it gives.
+		for _, k := range equalSweepKinds() {
+			for _, ua := range equalSweepUnits(k) {
+				for _, ub := range equalSweepUnits(k) {
+					for _, ma := range equalSweepMags() {
+						for _, mb := range equalSweepMags() {
+							a, b := units.New(ma, ua), units.New(mb, ub)
+							for _, tol := range equalSweepTols() {
+								require.Equal(t, a.Equal(b, tol), b.Equal(a, tol),
+									"Equal is symmetric: %s, %s at tol %v", a, b, tol)
+							}
+						}
+					}
+				}
+			}
+		}
+	})
+
+	t.Run("reflexivity", func(t *testing.T) {
+		// A value equals itself at every tolerance, whatever its magnitude — including
+		// Meters(1e307), whose base magnitude, 1e310 mm, is +Inf.
+		vs := append(extremes(), units.Meters(1e307), units.New(math.MaxFloat64, hugeLength),
+			units.New(5e-324, tinyLength), units.Grams(1e-322))
+		for _, k := range equalSweepKinds() {
+			for _, u := range equalSweepUnits(k) {
+				for _, m := range equalSweepMags() {
+					vs = append(vs, units.New(m, u))
+				}
+			}
+		}
+
+		for _, v := range vs {
+			for _, tol := range []float64{0, 5e-324, 1e-9, 1e300, math.MaxFloat64} {
+				require.True(t, v.Equal(v, tol), "%s equals itself at tol %v", v, tol)
+				require.True(t, units.New(v.Mag(), v.Unit()).Equal(v, tol),
+					"…and so does a value rebuilt from its own magnitude and unit")
+			}
+		}
+	})
+
+	t.Run("a tolerance of zero across units", func(t *testing.T) {
+		// A unit's factor is itself a rounded float64, so two values written in
+		// different units generally do not denote the same real number. Degree's factor
+		// is a rounded pi/180: 180 of them and math.Pi radians are different quantities,
+		// and at a tolerance of zero Equal says so. It is what a caller asked for — the
+		// same real number — and the tolerance is what a cross-unit comparison is for.
+		require.False(t, units.Degrees(180).Equal(units.Radians(math.Pi), 0),
+			"180 deg and pi rad are not the same real number")
+		require.False(t, units.Radians(math.Pi).Equal(units.Degrees(180), 0), "…in either order")
+		require.True(t, units.Degrees(180).Equal(units.Radians(math.Pi), 1e-15),
+			"…and a tolerance in base units is what compares them")
+
+		// A gram's factor is a rounded 0.001, so 1000 of them are not exactly the
+		// kilogram either — the same fact, in a unit nobody thinks of as inexact.
+		require.False(t, units.Kilograms(1).Equal(units.Grams(1000), 0),
+			"1000 g is not exactly 1 kg: the gram's factor is a rounded 0.001")
+		require.False(t, units.Grams(1000).Equal(units.Kilograms(1), 0), "…in either order")
+		require.True(t, units.Kilograms(1).Equal(units.Grams(1000), 1e-15),
+			"…and a tolerance in base units is what compares them")
+
+		// Where the two renderings do coincide exactly — a factor float64 holds, such
+		// as the 1000 in a metre or the 25.4 an inch is defined as — a tolerance of
+		// zero finds them equal, whatever the two factors are.
+		for _, p := range [][2]units.Value{
+			{units.Millimeters(25.4), units.Inches(1)},
+			{units.Meters(1), units.Millimeters(1000)},
+			{units.Liters(1), units.CubicCentimeters(1000)},
+			{units.Millimeters(1e300), units.New(1, hugeLength)},
+			{units.Millimeters(1e-300), units.New(1, tinyLength)},
+		} {
+			require.True(t, p[0].Equal(p[1], 0), "%s is exactly %s", p[0], p[1])
+			require.True(t, p[1].Equal(p[0], 0), "…in either order")
+		}
+	})
+}

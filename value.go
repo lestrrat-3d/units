@@ -449,34 +449,79 @@ func (v Value) Scale(f float64) Value { return Value{v.mag * f, v.unit} }
 // non-finite Value.
 func (v Value) Neg() Value { return Value{-v.mag, v.unit} }
 
-// Equal reports whether v and o represent the same quantity to within tol of
-// the kind's base unit. Values of different kinds are never equal.
+// Equal reports whether v and o represent the same quantity to within tol of the
+// kind's base unit: it is true exactly when |v − o| <= tol, where v − o is the
+// true difference of the two quantities in base units. Values of different kinds
+// are never equal. The answer does not depend on which operand is the receiver.
 //
-// Equal has no error to report, so it takes the difference before the base unit:
-// it subtracts in a unit common to both operands and rescales only the
-// difference. Two values whose base magnitudes both overflow have an ordinary
-// difference, and a value is equal to itself whatever its magnitude.
+// The difference is the *true* one, never a rounding of it. Rescaling both
+// operands into a common unit and subtracting there is a composition, and the
+// rounding in between is one the comparison never authorised: a difference of
+// 1e-300 mm rescaled into a unit of factor 1e300 underflows to zero, and two
+// quantities that genuinely differ come back equal at a tolerance of zero. So
+// wherever the float64 arithmetic cannot hold the difference the comparison is
+// made in exact rationals; see [sum], which reads the same rule.
 //
-// The answer does not depend on which operand is the receiver: the common unit
-// is chosen by a property of the pair — the larger of the two factors — so
-// swapping v and o negates the difference and leaves its magnitude alone.
+// # What tol == 0 means
+//
+// A tolerance of zero asks whether the two quantities are exactly the same real
+// number — their true base-unit magnitudes coincide — and nothing weaker. Two
+// values written in different units generally do NOT coincide, because a unit's
+// factor is itself a rounded float64: [Degree]'s factor is a rounded π/180, so
+// 180 × factor and math.Pi are different quantities and Degrees(180).Equal(
+// Radians(math.Pi), 0) is false. They differ, and Equal says so.
+//
+// So tol == 0 is for values carried in the same unit, and for asking whether two
+// quantities are exactly the same real number. Pass a tolerance — in base units —
+// for any comparison across units.
 func (v Value) Equal(o Value, tol float64) bool {
 	if v.unit.kind != o.unit.kind {
 		return false
 	}
 	vu, ou := v.Unit(), o.Unit()
 
-	// The common unit is chosen by a rule that depends on the pair, not on the
-	// order it is read in: the larger factor. Both operands rescale into it, so
-	// swapping v and o negates the difference and leaves its magnitude alone.
-	// Equal factors leave nothing to choose: both rescales are the identity and
-	// the final rescale is by that same factor, whichever unit is named.
-	cu := vu
-	if ou.factor > vu.factor {
-		cu = ou
+	// An infinity or a NaN magnitude has no exact rational, and keeps the float
+	// path, where it propagates as it would through the plain arithmetic: |Inf − Inf|
+	// is a NaN, and NaN <= tol is false. The common unit is chosen by a property of
+	// the pair — the larger factor — and so by nothing that depends on which operand
+	// is the receiver.
+	if !exactly(v.mag, o.mag) {
+		cu := vu
+		if ou.factor > vu.factor {
+			cu = ou
+		}
+		d := rescale(v.mag, vu.factor, cu.factor) - rescale(o.mag, ou.factor, cu.factor)
+		return math.Abs(rescale(d, cu.factor, 1)) <= tol
 	}
-	d := rescale(v.mag, vu.factor, cu.factor) - rescale(o.mag, ou.factor, cu.factor)
-	return math.Abs(rescale(d, cu.factor, 1)) <= tol
+
+	// The fast path, kept where it is provably lossless: two operands carried in the
+	// same unit differ by exactly v.mag − o.mag of it, and a factor is positive and
+	// finite, so they are the same quantity exactly when their magnitudes are — no
+	// arithmetic, and so no rounding, stands between the operands and that answer. A
+	// value therefore equals itself however large its base magnitude, and equal
+	// magnitudes in one unit are equal at every tolerance a real number can take.
+	if vu.factor == ou.factor {
+		if v.mag == o.mag {
+			return tol >= 0
+		}
+		if tol == 0 {
+			return false
+		}
+	}
+
+	// A tolerance that is not a real number is no bound on a real difference: every
+	// difference of two finite quantities is within an infinite tolerance, and none
+	// is within a NaN or a negative infinity.
+	if !exactly(tol) {
+		return math.IsInf(tol, 1)
+	}
+
+	// A float64 magnitude and a float64 factor are exact rationals, so the true
+	// difference in base units is one too, whatever the two units are and however far
+	// apart their factors. It is compared with tol there, exactly: nothing is rounded,
+	// and swapping the operands only negates it.
+	d := new(big.Rat).Sub(baseRat(v.mag, vu.factor), baseRat(o.mag, ou.factor))
+	return d.Abs(d).Cmp(new(big.Rat).SetFloat64(tol)) <= 0
 }
 
 // String renders the value as "<magnitude> <symbol>" (just the number for

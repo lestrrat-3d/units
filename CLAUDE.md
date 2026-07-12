@@ -51,7 +51,8 @@ It is a **foundation module**: consumed by `github.com/lestrrat-3d/sketch` and
   MUST use them, and `Div`'s zero guard reads the divisor's own **magnitude**
   (a unit factor is positive and finite, so `mag == 0` iff the quantity is zero).
   `Base()` stays a public **accessor** — it may honestly report `+Inf` or `0` —
-  and no operation reads it.
+  and no operation reads it, `System.In` (which calls `rescale` for the number it
+  returns, having no error to pass on) included.
 - **An operation is ONE helper, never a composition of them.** A step that is sound
   on its own does not make the composition sound: the rounding *between* the steps
   has already happened. `Add`/`Sub` are `sum` — the whole addition, decided on the
@@ -67,6 +68,23 @@ It is a **foundation module**: consumed by `github.com/lestrrat-3d/sketch` and
   arithmetic in exact rationals wherever a rescale would round an operand on the way
   in. `Add` and `Sub` are correctly rounded, always — the suite asserts it bit for
   bit, and sweeps each operand against the one that most nearly annihilates it.
+  **`Equal` is the same rule, not an exception to it.** A tolerance predicate that
+  rescales both operands into a common unit and subtracts *there* is a composition,
+  and the rounding in between erases the difference it was asked to judge:
+  `Millimeters(1e-300)` against `New(0, huge)` (factor `1e300`) rescales to `0 − 0`,
+  and two quantities that differ by `1e-300 mm` come back equal at `tol == 0`. So
+  `Equal` is `|v − o| <= tol` on the **true** difference in base units, in exact
+  rationals wherever float64 cannot hold it, with the fast path kept only where it is
+  lossless (both operands in the same unit: equal quantities iff equal magnitudes).
+  Symmetry and reflexivity follow from the difference being the true one.
+- **`tol == 0` means the same real number — and two units generally do not agree on
+  one.** A unit's factor is itself a *rounded* float64, so `Degrees(180)` and
+  `Radians(math.Pi)` are different quantities (`Degree`'s factor is a rounded
+  `pi/180`), as are `Kilograms(1)` and `Grams(1000)` (a rounded `0.001`).
+  `Equal(…, 0)` says so, and that is the honest answer: it is for values in the same
+  unit, or for asking whether two quantities are *exactly* the same real number. A
+  cross-unit comparison passes a tolerance, in base units. NEVER "fix" this by
+  rounding the difference back into some unit first — that is the composition above.
 - **The helpers keep the plain expression's rounding — and add none.** The
   `Frexp`/`Ldexp` split buys range, and it MUST NOT be paid for in accuracy: the
   mantissas are combined in the same order, and grouped the same way, as the plain

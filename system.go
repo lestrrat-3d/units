@@ -55,13 +55,15 @@ func (s System) UnitFor(k Kind) Unit {
 // v built from an infinity, or one whose conversion genuinely overflows — is
 // returned as the infinity or NaN it is, never as a finite number that would be
 // read as a quantity it is not.
+//
+// The conversion is [rescale], the whole of it: the one helper [Value.In] itself
+// uses, called for the number it returns rather than for the error it cannot. A
+// base magnitude formed here instead — v.Base() ÷ u.Factor() — would be a
+// composition, and would round twice on its way to a boundary that the helper
+// decides on the true value.
 func (s System) In(v Value) float64 {
 	u := s.UnitFor(v.Kind())
-	m, err := v.In(u)
-	if err != nil {
-		return v.Base() / u.Factor()
-	}
-	return m
+	return rescale(v.mag, v.Unit().factor, u.Factor())
 }
 
 // Display returns v converted to the system's default unit for its kind, as

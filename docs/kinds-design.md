@@ -283,30 +283,64 @@ and the correctly rounded value when it does not.
 
 `Value.Base()` stays as it is: it is an **accessor**, not an operation. A value
 whose base magnitude genuinely overflows reports `+Inf` there, honestly, and one
-whose base magnitude underflows reports `0`. **No operation reads it** — not even
-`Div`'s zero-divisor guard, which reads the divisor's own magnitude: a base
+whose base magnitude underflows reports `0`. **No operation reads it** — not
+`Div`'s zero-divisor guard, which reads the divisor's own magnitude (a base
 magnitude would report a divide-by-zero for an ordinary small divisor whose
 product with its factor underflows, and refuse a quotient that is perfectly
-representable. The one place a base magnitude is still formed outside the accessor
-is `System.In`'s error path, where the infinity is the answer: a magnitude the
-presentation unit cannot hold comes back as the infinity it is, never as a finite
-number in the wrong unit.
+representable), and not `System.In`, which has no error to report and so calls
+`rescale` for the number rather than `Value.In` for the error it cannot pass on: a
+magnitude the presentation unit cannot hold comes back as the infinity it is,
+decided on the true value, never as a finite number in the wrong unit and never as
+a `MaxFloat64` two roundings left behind.
 
-`Equal` is the sharpest case, because it has no error channel at all:
-`|Inf − Inf|` is `NaN`, and `NaN <= tol` is `false`, so a value would not be equal
-to itself at any tolerance. It subtracts in a unit common to both operands and
-rescales only the difference.
+### Equality is decided on the true difference
 
-That common unit is chosen by a property of the **pair** — the larger of the two
-factors — and never by which operand is the receiver. An equality predicate whose
-answer depends on the order of its operands is broken whichever answer it gives:
-rescaling only the *other* operand rounds one side and not the other, so
-`a.Equal(b, 0)` and `b.Equal(a, 0)` could disagree about two renderings of one
-quantity. Rescaling **both** operands into the same unit makes the swap negate the
-difference and leave its magnitude alone, and equal factors leave nothing to
-choose — both rescales are the identity, and the final rescale is by that same
-factor whichever unit is named. The suite sweeps every built-in pair of a kind, at
-every tolerance including zero, for exactly this.
+`Equal` has no error channel at all, and it is the sharpest case of the one-helper
+rule. Rescaling both operands into a common unit and subtracting **there** is a
+composition, exactly as a sum is: the rescale rounds, and the comparison never
+authorised that rounding. It destroys the very quantity being judged —
+
+```go
+huge := units.Define("huge", units.Length, 1e300)
+units.Millimeters(1e-300).Equal(units.New(0, huge), 0)  // false: they differ by 1e-300 mm
+```
+
+— because `1e-300 mm` rescaled into a unit of factor `1e300` underflows to `0`, and
+a predicate that subtracts afterwards has nothing left to compare. So `Equal` is
+true exactly when `|v − o| <= tol` for the **true** difference of the two base
+magnitudes: a float64 magnitude and a float64 factor are exact rationals, so their
+difference is one too, and where the float64 arithmetic cannot hold it the
+comparison is made in `math/big` and decided exactly. The fast path is kept where
+it is provably lossless — two operands in the **same** unit differ by exactly
+`v.mag − o.mag` of it, and a factor is positive and finite, so they are the same
+quantity exactly when their magnitudes are. That is also why a value equals itself
+at every tolerance however large its base magnitude: `Meters(1e307)` never forms
+the `+Inf` its `Base()` reports, and `|Inf − Inf|`, a `NaN`, never arises.
+
+Symmetry falls out of the difference being the true one: swapping the operands only
+negates it, and `|d|` is unchanged. An equality predicate whose answer depends on
+which operand is the receiver is broken whichever answer it gives, and the suite
+sweeps every pair of units of a kind — the `Define`d factors of `1e±300` included —
+over magnitudes and tolerances, zero included, for exactly this.
+
+**A tolerance of zero asks whether the two quantities are the same real number.**
+Nothing weaker, and two values written in **different units** generally are not,
+because a unit's factor is itself a *rounded* float64:
+
+```go
+units.Degrees(180).Equal(units.Radians(math.Pi), 0)   // false: Degree's factor is a rounded pi/180,
+                                                      // so 180 x factor and math.Pi differ
+units.Kilograms(1).Equal(units.Grams(1000), 0)        // false: the gram's factor is a rounded 0.001
+units.Millimeters(25.4).Equal(units.Inches(1), 0)     // true: the inch is 25.4 mm, and float64 holds it
+```
+
+Reporting the first two as equal would be the lie — the quantities genuinely differ,
+and the difference is what the caller asked about. `tol == 0` is for values carried
+in the **same** unit, and for asking whether two quantities are *exactly* the same
+real number; a cross-unit comparison passes a tolerance, in base units, as it always
+should have. The suite asserts this against the same `big.Rat` oracle, at `tol == 0`
+and at tolerances down among the subnormals, over operands chosen so that a rescale
+would underflow their difference to nothing.
 
 ### An overflowed exponent is sticky
 
