@@ -43,61 +43,93 @@ var ErrNotFinite = errors.New("units: result is not finite")
 // Value is a magnitude paired with the [Unit] it is expressed in. The zero
 // Value is 0 of the dimensionless unit [One]: the zero [Unit] is read as One, so
 // a Value declared with var behaves as a plain 0 in every operation.
+//
+// # A Value never carries a negative zero
+//
+// Zero is zero: a quantity of −0 mm is not a thing, and the sign of a zero is not
+// a property of the quantity but of the float64 that happens to hold it. So every
+// zero a Value carries — one handed to [New] or a constructor, and one any
+// operation produces — is +0, and [Value.Mag] never returns a −0.
+//
+// It is a correctness rule, not a cosmetic one. The sign of an IEEE zero records
+// which way an expression got there — which term underflowed, which operand was
+// negated, which of two paths the arithmetic took — and none of that is the
+// quantity. Left uncanonicalised it becomes observable: [Value.Add] and [Value.Sub]
+// are correctly rounded from the true sum, and the true sum of two quantities that
+// annihilate is zero, one zero, whether the operands happened to share a unit (an
+// IEEE addition, which gives −0 for (−0) + (−0)) or not (exact rationals, which
+// carry no signed zero at all). Which of those paths runs is an implementation
+// detail; it must never be visible in the result. A −0 would also print as "-0"
+// and flip the sign a caller reads off [math.Signbit].
 type Value struct {
 	mag  float64
 	unit Unit
+}
+
+// canonicalZero returns x with a zero of either sign rendered as +0. It is applied
+// wherever a magnitude enters a Value or an operation hands a number back, so a −0
+// exists nowhere in the API: not from a constructor, not from an operation that
+// cancels, and not from one whose true result underflows to nothing.
+func canonicalZero(x float64) float64 {
+	if x == 0 {
+		return 0
+	}
+	return x
 }
 
 // New returns a Value of mag in unit u. It reports no error, so it does not
 // check mag: an infinite or NaN mag yields a Value carrying it. The arithmetic
 // that can report an error ([Value.Add], [Value.Sub], [Value.Mul], [Value.Div])
 // refuses to produce one.
-func New(mag float64, u Unit) Value { return Value{mag: mag, unit: u} }
+//
+// A mag of −0 is a +0: a Value never carries a negative zero, whoever built it.
+func New(mag float64, u Unit) Value { return Value{mag: canonicalZero(mag), unit: u} }
 
 // FromBase returns a Value equal to base (expressed in u's base unit), but
 // carried in unit u. For example FromBase(1000, Meter) is 1 m. Like [New] it
 // reports no error and so does not check base: an infinite or NaN base yields a
-// non-finite Value.
+// non-finite Value. A zero magnitude is a +0, as everywhere else.
 func FromBase(base float64, u Unit) Value {
 	u = u.normalize()
-	return Value{mag: base / u.factor, unit: u}
+	return Value{mag: canonicalZero(base / u.factor), unit: u}
 }
 
 // Millimeters, and the constructors below it, build a Value of x in each of the
-// built-in units.
-func Millimeters(x float64) Value { return Value{x, Millimeter} }
-func Centimeters(x float64) Value { return Value{x, Centimeter} }
-func Meters(x float64) Value      { return Value{x, Meter} }
-func Inches(x float64) Value      { return Value{x, Inch} }
-func Feet(x float64) Value        { return Value{x, Foot} }
-func Thous(x float64) Value       { return Value{x, Thou} }
-func Degrees(x float64) Value     { return Value{x, Degree} }
-func Radians(x float64) Value     { return Value{x, Radian} }
-func Scalar(x float64) Value      { return Value{x, One} }
+// built-in units. Like [New], each canonicalises a zero x to +0.
+func Millimeters(x float64) Value { return New(x, Millimeter) }
+func Centimeters(x float64) Value { return New(x, Centimeter) }
+func Meters(x float64) Value      { return New(x, Meter) }
+func Inches(x float64) Value      { return New(x, Inch) }
+func Feet(x float64) Value        { return New(x, Foot) }
+func Thous(x float64) Value       { return New(x, Thou) }
+func Degrees(x float64) Value     { return New(x, Degree) }
+func Radians(x float64) Value     { return New(x, Radian) }
+func Scalar(x float64) Value      { return New(x, One) }
 
-func SquareMillimeters(x float64) Value { return Value{x, SquareMillimeter} }
-func SquareCentimeters(x float64) Value { return Value{x, SquareCentimeter} }
-func SquareMeters(x float64) Value      { return Value{x, SquareMeter} }
-func SquareInches(x float64) Value      { return Value{x, SquareInch} }
+func SquareMillimeters(x float64) Value { return New(x, SquareMillimeter) }
+func SquareCentimeters(x float64) Value { return New(x, SquareCentimeter) }
+func SquareMeters(x float64) Value      { return New(x, SquareMeter) }
+func SquareInches(x float64) Value      { return New(x, SquareInch) }
 
-func CubicMillimeters(x float64) Value { return Value{x, CubicMillimeter} }
-func CubicCentimeters(x float64) Value { return Value{x, CubicCentimeter} }
-func CubicMeters(x float64) Value      { return Value{x, CubicMeter} }
-func CubicInches(x float64) Value      { return Value{x, CubicInch} }
-func Liters(x float64) Value           { return Value{x, Liter} }
+func CubicMillimeters(x float64) Value { return New(x, CubicMillimeter) }
+func CubicCentimeters(x float64) Value { return New(x, CubicCentimeter) }
+func CubicMeters(x float64) Value      { return New(x, CubicMeter) }
+func CubicInches(x float64) Value      { return New(x, CubicInch) }
+func Liters(x float64) Value           { return New(x, Liter) }
 
-func Kilograms(x float64) Value { return Value{x, Kilogram} }
-func Grams(x float64) Value     { return Value{x, Gram} }
-func Pounds(x float64) Value    { return Value{x, Pound} }
+func Kilograms(x float64) Value { return New(x, Kilogram) }
+func Grams(x float64) Value     { return New(x, Gram) }
+func Pounds(x float64) Value    { return New(x, Pound) }
 
-func KilogramSquareMillimeters(x float64) Value { return Value{x, KilogramSquareMillimeter} }
-func QuarticMillimeters(x float64) Value        { return Value{x, QuarticMillimeter} }
+func KilogramSquareMillimeters(x float64) Value { return New(x, KilogramSquareMillimeter) }
+func QuarticMillimeters(x float64) Value        { return New(x, QuarticMillimeter) }
 
-func KilogramsPerCubicMillimeter(x float64) Value { return Value{x, KilogramPerCubicMillimeter} }
-func KilogramsPerCubicMeter(x float64) Value      { return Value{x, KilogramPerCubicMeter} }
-func GramsPerCubicCentimeter(x float64) Value     { return Value{x, GramPerCubicCentimeter} }
+func KilogramsPerCubicMillimeter(x float64) Value { return New(x, KilogramPerCubicMillimeter) }
+func KilogramsPerCubicMeter(x float64) Value      { return New(x, KilogramPerCubicMeter) }
+func GramsPerCubicCentimeter(x float64) Value     { return New(x, GramPerCubicCentimeter) }
 
-// Mag returns the magnitude in the value's own unit.
+// Mag returns the magnitude in the value's own unit. It is never a −0: a Value
+// does not carry one.
 func (v Value) Mag() float64 { return v.mag }
 
 // Unit returns the value's unit; for the zero Value that is [One].
@@ -114,13 +146,18 @@ func (v Value) Kind() Kind { return v.unit.kind }
 // overflow on its own — [Meters](1e307) is an ordinary length whose base
 // magnitude is +Inf — so Base honestly reports that infinity. No operation on a
 // [Value] forms one, so none of them inherits that overflow; see [rescale].
-func (v Value) Base() float64 { return v.mag * v.Unit().factor }
+//
+// A zero base magnitude is +0, including one a negative quantity underflowed to:
+// the sign of a zero is not a property of the quantity, here as everywhere else in
+// the package.
+func (v Value) Base() float64 { return canonicalZero(v.mag * v.Unit().factor) }
 
 // In returns the magnitude expressed in unit u, or [ErrIncompatible] if u
 // measures a different kind. A magnitude that is not finite in u — a value built
 // from an infinity, or one whose conversion genuinely overflows — is
 // [ErrNotFinite]. A value is always expressible in the unit it already carries,
-// however large its base magnitude.
+// however large its base magnitude. A zero comes back as +0, in u as in every
+// other unit — a conversion cannot make a quantity negative.
 func (v Value) In(u Unit) (float64, error) {
 	if v.unit.kind != u.kind {
 		return 0, fmt.Errorf("%w: cannot express %s in %s", ErrIncompatible, v.unit.kind, u.kind)
@@ -134,7 +171,7 @@ func (v Value) In(u Unit) (float64, error) {
 
 // Convert returns the same quantity carried in unit u, under the same rules as
 // [Value.In]: a different kind is [ErrIncompatible], a non-finite magnitude is
-// [ErrNotFinite].
+// [ErrNotFinite], and a zero magnitude is +0.
 func (v Value) Convert(u Unit) (Value, error) {
 	m, err := v.In(u)
 	if err != nil {
@@ -154,6 +191,10 @@ func (v Value) Convert(u Unit) (Value, error) {
 // so a difference that cancels keeps whatever the cancellation leaves —
 // [ErrNotFinite] exactly when the true sum is past the last float64, and the
 // nearest float64, subnormals included, when it is not.
+//
+// A sum that is zero is +0, on either path and at either sign of the operands: the
+// result of a correctly rounded addition may not depend on which path computed it,
+// and the sign of a zero is not part of the quantity. See [Value].
 func (v Value) Add(o Value) (Value, error) { return v.combine(o, 1) }
 
 // Sub returns v − o, under the same rules as [Value.Add], including the finite,
@@ -295,6 +336,15 @@ func sameInfinity(a, b float64) bool {
 // An infinity or a NaN operand has no exact rational, and takes the fast path
 // whatever it lands on: it survives Frexp unchanged and propagates as it would have
 // through the plain arithmetic, so Inf × 0 is still a NaN.
+//
+// Which path ran is an implementation detail, and every helper hands back a result
+// in which it cannot be read. The one place it could be is the sign of a zero: an
+// IEEE addition of two exact terms gives (−0) + (−0) = −0 and a rational gives a
+// zero no sign at all, and a plain multiplication signs a zero by its operands while
+// an underflowed rational has only the sign the true result had. So every helper
+// canonicalises a zero result to +0 ([canonicalZero]) — the sign of a zero is not a
+// property of a quantity, and no caller can predict, or should be able to see, which
+// path the arithmetic took. See [Value].
 
 // nearTheEnds is the binary exponent past which the fast path is not trusted.
 // float64 runs out at 2¹⁰²⁴ and its normals at 2⁻¹⁰²², so ±1000 leaves twenty-odd
@@ -317,14 +367,13 @@ func atTheEnds(e int) bool { return e >= nearTheEnds || e <= -nearTheEnds }
 // infinity exactly when it overflows the range, and the nearest float64 — subnormals
 // included — when it does not.
 //
-// A rational carries no signed zero, so a result that underflows takes its sign from
-// neg: the sign the plain expression would have given it.
-func exact(r *big.Rat, neg bool) float64 {
+// A result that is zero — an exact cancellation, or a true value too small for the
+// smallest subnormal — is +0. A rational carries no signed zero, and neither does a
+// quantity: the sign a plain float64 expression would have put on it records how the
+// expression got there, not what the result is.
+func exact(r *big.Rat) float64 {
 	f, _ := r.Float64()
-	if f == 0 && neg {
-		return math.Copysign(0, -1)
-	}
-	return f
+	return canonicalZero(f)
 }
 
 // baseRat returns m × factor exactly: the base magnitude as a rational, which —
@@ -351,25 +400,26 @@ func exactly(xs ...float64) bool {
 // The mantissas are combined in the same order as the plain m × from ÷ to, so the
 // rounding is the plain expression's — the exponent split costs no accuracy, it only
 // keeps the intermediate in range — and at the ends of the range the true value is
-// rounded once instead.
+// rounded once instead. A zero result is +0, on either path.
 func rescale(m, from, to float64) float64 {
 	if from == to {
-		return m
+		return canonicalZero(m)
 	}
 	fm, em := math.Frexp(m)
 	ffrom, efrom := math.Frexp(from)
 	fto, eto := math.Frexp(to)
 	e := em + efrom - eto
 	if !atTheEnds(e) || !exactly(m, from, to) || to == 0 {
-		return math.Ldexp(fm*ffrom/fto, e)
+		return canonicalZero(math.Ldexp(fm*ffrom/fto, e))
 	}
-	return exact(new(big.Rat).Quo(baseRat(m, from), new(big.Rat).SetFloat64(to)), math.Signbit(m))
+	return exact(new(big.Rat).Quo(baseRat(m, from), new(big.Rat).SetFloat64(to)))
 }
 
 // product returns (a × af) × (b × bf): two magnitudes multiplied in base units.
 // The mantissas are grouped as the plain expression groups them, so the rounding is
 // the plain expression's; at the ends of the range the true product is rounded once
-// instead, so it overflows exactly when the true product does.
+// instead, so it overflows exactly when the true product does. A zero product is +0:
+// a quantity multiplied by zero is zero, not a zero of some sign.
 func product(a, af, b, bf float64) float64 {
 	fa, ea := math.Frexp(a)
 	faf, eaf := math.Frexp(af)
@@ -377,15 +427,15 @@ func product(a, af, b, bf float64) float64 {
 	fbf, ebf := math.Frexp(bf)
 	e := ea + eaf + eb + ebf
 	if !atTheEnds(e) || !exactly(a, af, b, bf) {
-		return math.Ldexp((fa*faf)*(fb*fbf), e)
+		return canonicalZero(math.Ldexp((fa*faf)*(fb*fbf), e))
 	}
-	return exact(new(big.Rat).Mul(baseRat(a, af), baseRat(b, bf)), math.Signbit(a) != math.Signbit(b))
+	return exact(new(big.Rat).Mul(baseRat(a, af), baseRat(b, bf)))
 }
 
 // quotient returns (a × af) ÷ (b × bf): two magnitudes divided in base units, under
 // the same rule as [product] — and a zero divisor, which [Value.Div] refuses before
 // it gets here, keeps the fast path, where it is an infinity or a NaN as it would be
-// in the plain expression.
+// in the plain expression. A zero quotient is +0, as a zero product is.
 func quotient(a, af, b, bf float64) float64 {
 	fa, ea := math.Frexp(a)
 	faf, eaf := math.Frexp(af)
@@ -393,9 +443,9 @@ func quotient(a, af, b, bf float64) float64 {
 	fbf, ebf := math.Frexp(bf)
 	e := ea + eaf - eb - ebf
 	if !atTheEnds(e) || !exactly(a, af, b, bf) || b == 0 || bf == 0 {
-		return math.Ldexp((fa*faf)/(fb*fbf), e)
+		return canonicalZero(math.Ldexp((fa*faf)/(fb*fbf), e))
 	}
-	return exact(new(big.Rat).Quo(baseRat(a, af), baseRat(b, bf)), math.Signbit(a) != math.Signbit(b))
+	return exact(new(big.Rat).Quo(baseRat(a, af), baseRat(b, bf)))
 }
 
 // sum returns (a × af + sign × b × bf) ÷ to: two magnitudes, each carried in a unit
@@ -423,9 +473,15 @@ func quotient(a, af, b, bf float64) float64 {
 //
 // An infinity or a NaN operand has no exact rational and keeps the fast path, where it
 // propagates as it would through the plain arithmetic.
+//
+// A sum that is zero is +0 on both paths. The paths cannot be allowed to disagree about
+// it: an IEEE addition gives (−0) + (−0) = −0 while a rational has no signed zero, so a
+// sum that cancels would come back +0 or −0 according to whether the operands happened
+// to share a unit — a difference the caller cannot predict and the correctly rounded
+// true sum does not have. The sign of a zero is not part of a quantity; see [Value].
 func sum(a, af, sign, b, bf, to float64) float64 {
 	if af == bf || to == 0 || !exactly(a, af, b, bf, to) {
-		return rescale(a, af, to) + sign*rescale(b, bf, to)
+		return canonicalZero(rescale(a, af, to) + sign*rescale(b, bf, to))
 	}
 	t := baseRat(b, bf)
 	if sign < 0 {
@@ -433,10 +489,7 @@ func sum(a, af, sign, b, bf, to float64) float64 {
 	}
 	t.Add(baseRat(a, af), t)
 	t.Quo(t, new(big.Rat).SetFloat64(to))
-
-	// A sum that underflows takes the sign of the true sum; one that is exactly zero
-	// is +0, as x + (−x) is in the plain arithmetic.
-	return exact(t, t.Sign() < 0)
+	return exact(t)
 }
 
 // Scale returns v multiplied by a dimensionless factor. It reports no error, so
@@ -447,13 +500,18 @@ func sum(a, af, sign, b, bf, to float64) float64 {
 // Accuracy is not at stake in it, only finiteness: the magnitude is scaled in v's
 // own unit, so there is one multiplication and one rounding — no unit factor, no
 // rescale, and nothing to cancel — and the result is the correctly rounded one
-// whenever float64 holds it.
-func (v Value) Scale(f float64) Value { return Value{v.mag * f, v.unit} }
+// whenever float64 holds it. A result that is zero — a zero v, a zero f, or a product
+// that underflows — is +0, whatever the signs that produced it.
+func (v Value) Scale(f float64) Value { return Value{canonicalZero(v.mag * f), v.unit} }
 
 // Neg returns −v. It reports no error and cannot make a finite magnitude
 // non-finite, and negation is exact; a v that is already non-finite negates to a
 // non-finite Value.
-func (v Value) Neg() Value { return Value{-v.mag, v.unit} }
+//
+// The negation of a zero is a zero: +0, not the −0 that IEEE negation gives, which
+// would print as "-0" and read as negative under [math.Signbit] though the quantity
+// is neither. See [Value].
+func (v Value) Neg() Value { return Value{canonicalZero(-v.mag), v.unit} }
 
 // Equal reports whether v and o represent the same quantity to within tol of the
 // kind's base unit: it is true exactly when |v − o| <= tol, where v − o is the
@@ -550,7 +608,8 @@ func (v Value) Equal(o Value, tol float64) bool {
 }
 
 // String renders the value as "<magnitude> <symbol>" (just the number for
-// dimensionless values).
+// dimensionless values). A zero renders as "0": a Value carries no negative zero,
+// so there is no "-0 mm" to print.
 func (v Value) String() string {
 	n := strconv.FormatFloat(v.mag, 'g', -1, 64)
 	if v.unit.kind == Dimensionless {

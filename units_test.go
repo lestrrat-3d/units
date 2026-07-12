@@ -357,8 +357,8 @@ func TestZeroValue(t *testing.T) {
 	require.Equal(t, units.One, v.Unit(), "the zero Value carries One")
 	require.Equal(t, units.Dimensionless, v.Kind())
 	require.InDelta(t, 1, v.Unit().Factor(), 0, "the zero Value's unit has factor 1")
-	require.InDelta(t, 0, v.Mag(), 0)
-	require.InDelta(t, 0, v.Base(), 0)
+	sameFloat64f(t, 0, v.Mag(), "the zero Value is a positive zero")
+	sameFloat64f(t, 0, v.Base(), "…in base units too")
 	require.Equal(t, "0", v.String())
 
 	sum, err := v.Add(units.Scalar(5))
@@ -374,14 +374,15 @@ func TestZeroValue(t *testing.T) {
 	require.NoError(t, err)
 	require.InDelta(t, -5, diff.Base(), 1e-12)
 
-	// It scales, converts and compares like any other dimensionless value.
-	require.InDelta(t, 0, v.Scale(3).Base(), 0)
-	require.InDelta(t, 0, v.Neg().Base(), 0)
+	// It scales, converts and compares like any other dimensionless value — and every
+	// zero it produces is a positive zero, the negation included.
+	sameFloat64f(t, 0, v.Scale(3).Base(), "a zero scaled is a zero")
+	sameFloat64f(t, 0, v.Neg().Base(), "the negation of a zero is a positive zero")
 	require.True(t, v.Equal(units.Scalar(0), 0), "the zero Value equals a zero scalar")
 
 	one, err := v.In(units.One)
 	require.NoError(t, err)
-	require.InDelta(t, 0, one, 0)
+	sameFloat64f(t, 0, one, "a zero converts to a zero")
 
 	// The angle carve-out reaches it too: 0 + 90deg is 90deg, not +Inf.
 	ang, err := v.Add(units.Degrees(90))
@@ -393,7 +394,7 @@ func TestZeroValue(t *testing.T) {
 	p, err := v.Mul(units.Millimeters(3))
 	require.NoError(t, err)
 	require.Equal(t, units.Length, p.Kind())
-	require.InDelta(t, 0, p.Base(), 0)
+	sameFloat64f(t, 0, p.Base(), "a zero times a length is a zero length")
 
 	q, err := units.Millimeters(3).Div(units.Scalar(2))
 	require.NoError(t, err)
@@ -891,7 +892,7 @@ func TestAddNotFinite(t *testing.T) {
 	s, err := units.Meters(1e308).Add(units.Meters(-1e308))
 	require.NoError(t, err)
 	require.Equal(t, units.Length, s.Kind())
-	require.InDelta(t, 0, s.Mag(), 0)
+	sameFloat64f(t, 0, s.Mag(), "the sum cancels to a positive zero")
 
 	s, err = units.Meters(1).Add(units.Millimeters(500))
 	require.NoError(t, err)
@@ -931,7 +932,7 @@ func TestBaseMagnitudeIsNeverAnIntermediate(t *testing.T) {
 	t.Run("In: a value in the unit it already carries", func(t *testing.T) {
 		m, err := huge.In(units.Meter)
 		require.NoError(t, err, "a value is always expressible in its own unit")
-		require.Equal(t, 1e307, m)
+		sameFloat64f(t, 1e307, m, "a value in its own unit is its own magnitude")
 	})
 
 	t.Run("In: a conversion whose result is representable", func(t *testing.T) {
@@ -945,14 +946,14 @@ func TestBaseMagnitudeIsNeverAnIntermediate(t *testing.T) {
 		c, err := huge.Convert(units.Meter)
 		require.NoError(t, err)
 		require.Equal(t, units.Meter, c.Unit())
-		require.Equal(t, 1e307, c.Mag())
+		sameFloat64f(t, 1e307, c.Mag(), "Convert carries the same magnitude")
 	})
 
 	t.Run("Div: a value divided by itself is 1", func(t *testing.T) {
 		q, err := huge.Div(huge)
 		require.NoError(t, err)
 		require.Equal(t, units.Dimensionless, q.Kind())
-		require.Equal(t, 1.0, q.Mag())
+		sameFloat64f(t, 1.0, q.Mag(), "a value divided by itself is exactly 1")
 	})
 
 	t.Run("Mul: a huge length by a tiny one", func(t *testing.T) {
@@ -986,18 +987,18 @@ func TestBaseMagnitudeIsNeverAnIntermediate(t *testing.T) {
 		require.NoError(t, err)
 		require.Equal(t, units.Angle, s.Kind(), "angle + scalar is an angle")
 		require.Equal(t, turn, s.Unit(), "…carried in the angle's own unit")
-		require.Equal(t, 1e308, s.Mag(), "a radian is far below the last ulp of 1e308 turns")
+		sameFloat64f(t, 1e308, s.Mag(), "a radian is far below the last ulp of 1e308 turns")
 
 		s, err = units.Scalar(1).Add(rev)
 		require.NoError(t, err)
 		require.Equal(t, units.Angle, s.Kind(), "scalar + angle is an angle whichever side it appeared on")
 		require.Equal(t, turn, s.Unit())
-		require.Equal(t, 1e308, s.Mag())
+		sameFloat64f(t, 1e308, s.Mag(), "…and the same magnitude")
 
 		// The same arm with an angle on both sides was already ratio-first.
 		s, err = rev.Add(units.Radians(1))
 		require.NoError(t, err)
-		require.Equal(t, 1e308, s.Mag())
+		sameFloat64f(t, 1e308, s.Mag(), "…as with an angle on both sides")
 	})
 
 	t.Run("System.In and System.Display", func(t *testing.T) {
@@ -1008,7 +1009,7 @@ func TestBaseMagnitudeIsNeverAnIntermediate(t *testing.T) {
 			"an unrepresentable magnitude is an infinity, never a finite number in the wrong unit")
 
 		// The representable ones come back in the system's unit, as always.
-		require.Equal(t, 1e307, units.SI().In(huge), "SI presents a length in metres")
+		sameFloat64f(t, 1e307, units.SI().In(huge), "SI presents a length in metres")
 		require.InEpsilon(t, 2000.0, units.Metric().In(units.Meters(2)), 1e-12)
 
 		// Display cannot carry the quantity in millimetres, so it hands back the
@@ -1016,7 +1017,7 @@ func TestBaseMagnitudeIsNeverAnIntermediate(t *testing.T) {
 		d := units.Metric().Display(huge)
 		require.Equal(t, units.Length, d.Kind())
 		require.Equal(t, units.Meter, d.Unit())
-		require.Equal(t, 1e307, d.Mag())
+		sameFloat64f(t, 1e307, d.Mag(), "…with the magnitude it already had")
 
 		require.Equal(t, units.Millimeter, units.Metric().Display(units.Meters(2)).Unit())
 	})
@@ -1038,9 +1039,54 @@ var (
 // opinion: there is no band around MaxFloat64 in which either answer will do.
 // [big.Rat] holds the true result exactly, whatever its size, and Float64 rounds
 // it to nearest-even once, the way an operation on the true result would have to.
-func nearest(want *big.Rat) float64 {
+//
+// A zero result is +0 — a true zero, and a true value too small for the smallest
+// subnormal alike. That is the contract the operations state: the sign of a zero is
+// not a property of a quantity, so a Value never carries a negative one, and the
+// oracle says the same. It matters because every assertion below compares against
+// this number bit for bit ([sameFloat64f]).
+func nearest(want *big.Rat) float64 { return positiveZero(mustFloat64(want)) }
+
+func mustFloat64(want *big.Rat) float64 {
 	f, _ := want.Float64()
 	return f
+}
+
+// positiveZero renders a zero as +0, the way every operation in the package does:
+// the sign of a zero is not a property of a quantity, so a Value never carries a
+// −0. The oracles state the contract with it rather than IEEE's sign rules.
+func positiveZero(x float64) float64 {
+	if x == 0 {
+		return 0
+	}
+	return x
+}
+
+// sameFloat64f asserts that got is want bit for bit, the sign of a zero included.
+//
+// An exactness claim is a claim about the float64 itself, and an IEEE == cannot
+// make it: +0 == −0 is true, so require.Equal on two float64s is blind to a result
+// that came back a negative zero — which is a different float64, prints as "-0",
+// and reads as negative under math.Signbit. Every claim in this suite that a result
+// is *the* correctly rounded float64, rather than one within a tolerance of it, is
+// asserted with this.
+func sameFloat64f(t *testing.T, want, got float64, format string, args ...any) {
+	t.Helper()
+
+	require.Equal(t, math.Float64bits(want), math.Float64bits(got),
+		"%s: want %v (bits %#016x), got %v (bits %#016x)",
+		fmt.Sprintf(format, args...), want, math.Float64bits(want), got, math.Float64bits(got))
+}
+
+// sameValuef asserts that got is want: the same unit, and the same magnitude bit for
+// bit. require.Equal on two Values compares their magnitudes with ==, which — like
+// every float comparison — cannot see a negative zero.
+func sameValuef(t *testing.T, want, got units.Value, format string, args ...any) {
+	t.Helper()
+
+	label := fmt.Sprintf(format, args...)
+	require.Equal(t, want.Unit(), got.Unit(), "%s: the unit", label)
+	sameFloat64f(t, want.Mag(), got.Mag(), "%s: the magnitude", label)
 }
 
 // overflows reports whether the true result is past the last float64 — the last
@@ -1068,7 +1114,7 @@ func ulpErr(t *testing.T, got float64, want *big.Rat) float64 {
 	w, _ := want.Float64()
 	require.False(t, math.IsInf(w, 0), "the true result %s is representable", want.FloatString(3))
 	if w == 0 {
-		require.InDelta(t, 0, got, 0, "the true result is zero")
+		sameFloat64f(t, 0, got, "the true result is zero, so the result is a positive zero")
 		return 0
 	}
 	return ulpsBetween(t, got, want, ulpAt(w))
@@ -1124,12 +1170,18 @@ func ratOf(t *testing.T, x float64) *big.Rat {
 // requireClose asserts that got is the float64 rendering of want, to a relative
 // tolerance — with an absolute floor, because a true result down among the
 // subnormals has no relative precision left to compare against.
+//
+// A zero it judges on the bits instead: a tolerance cannot see the difference
+// between +0 and −0 (their difference is zero), and a Value never carries a −0. So
+// every operation this helper judges — the whole extreme matrix — is swept for one.
 func requireClose(t *testing.T, got float64, want *big.Rat) {
 	t.Helper()
 
 	g := new(big.Rat).SetFloat64(got)
 	require.NotNil(t, g, "the true result %s is representable, so the result is finite: got %v",
 		want.FloatString(3), got)
+	require.False(t, math.Signbit(got) && got == 0,
+		"a zero result is a positive zero: the true result is %s, got a negative zero", want.FloatString(3))
 
 	diff := new(big.Rat).Abs(new(big.Rat).Sub(g, want))
 	tol := new(big.Rat).Mul(new(big.Rat).Abs(want), relTol)
@@ -1230,7 +1282,7 @@ func TestExtremeMatrix(t *testing.T) {
 			// it already carries, whatever its base magnitude.
 			m, err := v.In(v.Unit())
 			require.NoError(t, err, "%s in its own unit", v)
-			require.Equal(t, v.Mag(), m, "%s in its own unit is its own magnitude", v)
+			sameFloat64f(t, v.Mag(), m, "%s in its own unit is its own magnitude", v)
 
 			for _, u := range unitsOfKind(v.Kind()) {
 				want := new(big.Rat).Quo(baseRat(t, v), ratOf(t, u.Factor()))
@@ -1246,7 +1298,7 @@ func TestExtremeMatrix(t *testing.T) {
 				}
 				require.NoError(t, cerr)
 				require.Equal(t, u, c.Unit(), "Convert carries the target unit")
-				require.Equal(t, m, c.Mag(), "Convert agrees with In: %s in %s", v, u)
+				sameFloat64f(t, m, c.Mag(), "Convert agrees with In: %s in %s", v, u)
 			}
 		}
 	})
@@ -1341,11 +1393,11 @@ func TestExtremeMatrix(t *testing.T) {
 
 	t.Run("Scale and Neg", func(t *testing.T) {
 		for _, v := range extremes() {
-			require.Equal(t, -v.Mag(), v.Neg().Mag(), "%s negates", v)
+			sameFloat64f(t, positiveZero(-v.Mag()), v.Neg().Mag(), "%s negates", v)
 			require.Equal(t, v.Unit(), v.Neg().Unit(), "…in its own unit")
 			require.True(t, v.Neg().Neg().Equal(v, 0), "…and negating twice is the identity")
 
-			require.Equal(t, v.Mag(), v.Scale(1).Mag(), "scaling by 1 is the identity")
+			sameFloat64f(t, v.Mag(), v.Scale(1).Mag(), "scaling by 1 is the identity: %s", v)
 			require.True(t, v.Scale(1).Equal(v, 0))
 			require.Equal(t, v.Kind(), v.Scale(2).Kind(), "scaling keeps the kind")
 		}
@@ -1365,7 +1417,7 @@ func TestExtremeMatrix(t *testing.T) {
 				require.Equal(t, v.Kind(), d.Kind(), "Display preserves the kind: %s", v)
 				if _, err := v.In(u); err != nil {
 					require.Equal(t, v.Unit(), d.Unit(), "a value it cannot carry in u comes back unchanged")
-					require.Equal(t, v.Mag(), d.Mag())
+					sameFloat64f(t, v.Mag(), d.Mag(), "…with its own magnitude: %s", v)
 					continue
 				}
 				require.Equal(t, u, d.Unit(), "Display carries the system's unit: %s", v)
@@ -1393,25 +1445,27 @@ func TestConversionIsExact(t *testing.T) {
 	// from a 0.9999999999999999, which is why these are bit-for-bit assertions.
 	in, err := units.Millimeters(25.4).In(units.Inch)
 	require.NoError(t, err)
-	require.Equal(t, 1.0, in, "25.4 mm is exactly 1 in")
+	sameFloat64f(t, 1.0, in, "25.4 mm is exactly 1 in")
 
 	d, err := units.GramsPerCubicCentimeter(1000).In(units.KilogramPerCubicMeter)
 	require.NoError(t, err)
-	require.Equal(t, 1e6, d, "1000 g/cm^3 is exactly 1e6 kg/m^3")
+	sameFloat64f(t, 1e6, d, "1000 g/cm^3 is exactly 1e6 kg/m^3")
 
 	t.Run("a value in the unit it already carries", func(t *testing.T) {
-		mags := append(everydayMags(), 5e-324, 1e-322, 1e-300, 1e307, -1e307, math.MaxFloat64)
+		mags := append(everydayMags(),
+			0, negativeZero(), // a zero comes back a positive zero, whichever zero went in
+			5e-324, 1e-322, 1e-300, 1e307, -1e307, math.MaxFloat64)
 		for _, u := range builtinUnits() {
 			for _, m := range mags {
 				v := units.New(m, u)
 
 				got, err := v.In(u)
 				require.NoError(t, err, "a value is always expressible in its own unit: %s", v)
-				require.Equal(t, v.Mag(), got, "%s in its own unit is its own magnitude", v)
+				sameFloat64f(t, v.Mag(), got, "%s in its own unit is its own magnitude", v)
 
 				c, err := v.Convert(u)
 				require.NoError(t, err)
-				require.Equal(t, v, c, "…and Convert hands back the value itself")
+				sameValuef(t, v, c, "…and Convert hands back the value itself")
 			}
 		}
 	})
@@ -1717,15 +1771,15 @@ func TestArithmeticAtTheExtremesIsNoWorseThanNaive(t *testing.T) {
 		// expression gives, because 1.25e307 cm is 1e308 mm — still in range.
 		q, err := units.Scalar(1.25).Div(units.Centimeters(1e307))
 		require.NoError(t, err)
-		require.Equal(t, 1.25e-308, q.Mag(), "a subnormal quotient is rounded once, not twice")
-		require.Equal(t, (1.25*1)/(1e307*10), q.Mag(), "…which is what the plain expression gives")
+		sameFloat64f(t, 1.25e-308, q.Mag(), "a subnormal quotient is rounded once, not twice")
+		sameFloat64f(t, (1.25*1)/(1e307*10), q.Mag(), "…which is what the plain expression gives")
 
 		// 5e-324 m × -2.5 g is -3 × 2⁻¹⁰⁷⁴: three ulps of the subnormal range, not
 		// the two a second rounding would give.
 		p, err := units.Meters(5e-324).Mul(units.Grams(-2.5))
 		require.NoError(t, err)
-		require.Equal(t, -1.5e-323, p.Mag(), "a subnormal product is rounded once, not twice")
-		require.Equal(t, (5e-324*1000)*(-2.5*0.001), p.Mag(), "…which is what the plain expression gives")
+		sameFloat64f(t, -1.5e-323, p.Mag(), "a subnormal product is rounded once, not twice")
+		sameFloat64f(t, (5e-324*1000)*(-2.5*0.001), p.Mag(), "…which is what the plain expression gives")
 	})
 
 	t.Run("Mul", func(t *testing.T) {
@@ -1808,7 +1862,7 @@ func TestArithmeticAtTheExtremesIsNoWorseThanNaive(t *testing.T) {
 
 					c, err := v.Convert(to)
 					require.NoError(t, err)
-					require.Equal(t, got, c.Mag(), "Convert agrees with In: %s in %s", v, to)
+					sameFloat64f(t, got, c.Mag(), "Convert agrees with In: %s in %s", v, to)
 				}
 			}
 		}
@@ -1907,7 +1961,7 @@ func requireExactBoundaryf(t *testing.T, got, naive float64, err error, want *bi
 	require.NoError(t, err, "%s: the true result %s is representable", label, want.FloatString(3))
 
 	if w := nearest(want); atTheEnds(w) {
-		require.Equal(t, w, got, "%s: the true result %s rounds to %v", label, want.FloatString(3), w)
+		sameFloat64f(t, w, got, "%s: the true result %s rounds to %v", label, want.FloatString(3), w)
 		return
 	}
 	requireNoWorseThanNaivef(t, got, naive, want, "%s", label)
@@ -1933,7 +1987,7 @@ func TestOverflowBoundaryIsDecided(t *testing.T) {
 		// rounded up over the boundary on the way.
 		q, err := units.Grams(math.Nextafter(math.MaxFloat64, 0)).Div(units.Grams(0.9999999999999999))
 		require.NoError(t, err, "the true quotient is representable, so it is not an overflow")
-		require.Equal(t, math.MaxFloat64, q.Mag(), "…and it is the last float64")
+		sameFloat64f(t, math.MaxFloat64, q.Mag(), "…and it is the last float64")
 	})
 
 	signs := []float64{1, -1}
@@ -2004,7 +2058,7 @@ func TestOverflowBoundaryIsDecided(t *testing.T) {
 							continue
 						}
 						require.NoError(t, cerr)
-						require.Equal(t, got, c.Mag(), "Convert agrees with In")
+						sameFloat64f(t, got, c.Mag(), "Convert agrees with In")
 					}
 				}
 			}
@@ -2087,7 +2141,7 @@ func TestAddSubIsCorrectlyRounded(t *testing.T) {
 								sum, err := o.do(a, b)
 								require.NoError(t, err, "%s %s %s", a, o.op, b)
 								require.Equal(t, ua, sum.Unit(), "the sum is carried in the left operand's unit")
-								require.Equal(t, nearest(want), sum.Mag(),
+								sameFloat64f(t, nearest(want), sum.Mag(),
 									"%s %s %s: the true result is %s", a, o.op, b, want.FloatString(30))
 							}
 						}
@@ -2149,30 +2203,30 @@ func TestAddSubKeepsCancellation(t *testing.T) {
 		// In a's unit the sum is an ordinary number near the top of the range…
 		sum, err := a.Add(b)
 		require.NoError(t, err, "the true sum is representable, so it is not an overflow")
-		require.Equal(t, 6.531456099116113e+291, sum.Mag(), "and it is not zero")
+		sameFloat64f(t, 6.531456099116113e+291, sum.Mag(), "and it is not zero")
 
 		// …and in b's — the same quantity, so the same cancellation — a subnormal.
 		sum, err = b.Add(a)
 		require.NoError(t, err, "the true sum is representable in either operand's unit")
-		require.Equal(t, 6.53145609911611e-309, sum.Mag(), "a subnormal sum is the true one, rounded once")
+		sameFloat64f(t, 6.53145609911611e-309, sum.Mag(), "a subnormal sum is the true one, rounded once")
 
 		// Sub is the same sum with the right-hand operand negated, and says the same.
 		sum, err = a.Sub(b.Neg())
 		require.NoError(t, err)
-		require.Equal(t, 6.531456099116113e+291, sum.Mag())
+		sameFloat64f(t, 6.531456099116113e+291, sum.Mag(), "Sub is the same sum")
 
 		sum, err = b.Sub(a.Neg())
 		require.NoError(t, err)
-		require.Equal(t, 6.53145609911611e-309, sum.Mag())
+		sameFloat64f(t, 6.53145609911611e-309, sum.Mag(), "…in either operand's unit")
 
 		// Both signs: negating both operands negates the sum, and nothing else.
 		sum, err = a.Neg().Add(b.Neg())
 		require.NoError(t, err)
-		require.Equal(t, -6.531456099116113e+291, sum.Mag())
+		sameFloat64f(t, -6.531456099116113e+291, sum.Mag(), "negating both operands negates the sum")
 
 		sum, err = b.Neg().Sub(a)
 		require.NoError(t, err)
-		require.Equal(t, -6.53145609911611e-309, sum.Mag())
+		sameFloat64f(t, -6.53145609911611e-309, sum.Mag(), "…and nothing else")
 
 		// And where the two do not cancel but reinforce, the true sum is past the
 		// last float64 in a's unit — which is an overflow, and is reported as one.
@@ -2227,7 +2281,7 @@ func TestAddSubKeepsCancellation(t *testing.T) {
 								require.NoError(t, err, "%s %s %s: the true result %s is representable",
 									a, o.op, b, want.FloatString(3))
 								require.Equal(t, combineUnit(a, b), sum.Unit())
-								require.Equal(t, nearest(want), sum.Mag(),
+								sameFloat64f(t, nearest(want), sum.Mag(),
 									"%s %s %s: the true result is %s", a, o.op, b, want.FloatString(30))
 							}
 						}
@@ -2266,11 +2320,12 @@ func equalSweepUnits(k units.Kind) []units.Unit {
 	return u
 }
 
-// equalSweepMags are the magnitudes the difference sweep runs over: both zeros,
-// the subnormals, the everyday numbers, and the top of the range.
+// equalSweepMags are the magnitudes the difference sweep runs over: zero — handed in
+// at either sign, both of which build a Value of +0 — the subnormals, the everyday
+// numbers, and the top of the range.
 func equalSweepMags() []float64 {
 	return []float64{
-		0, math.Copysign(0, -1),
+		0, negativeZero(),
 		5e-324, 1e-320, 1e-300,
 		1, -2.5, 25.4, math.Pi, 1000,
 		1e300, 1e307, math.MaxFloat64,
@@ -2327,8 +2382,8 @@ func TestEqualDecidesOnTheTrueDifference(t *testing.T) {
 		// subtracts after the rescale has nothing left to compare.
 		tiny := units.Millimeters(1e-300)
 		for _, z := range []units.Value{
-			units.New(math.Copysign(0, -1), hugeLength), // the reproducer's negative zero…
-			units.New(0, hugeLength),                    // …and an ordinary one
+			units.New(negativeZero(), hugeLength), // a −0 handed in, which New canonicalises to +0…
+			units.New(0, hugeLength),              // …and an ordinary zero
 		} {
 			require.False(t, tiny.Equal(z, 0), "%s is not %s: they differ by 1e-300 mm", tiny, z)
 			require.False(t, z.Equal(tiny, 0), "…nor the other way round")
@@ -2385,7 +2440,7 @@ func TestEqualDecidesOnTheTrueDifference(t *testing.T) {
 					for _, ma := range equalSweepMags() {
 						a := units.New(ma, ua)
 
-						mbs := []float64{ma, 0, math.Copysign(0, -1)}
+						mbs := []float64{ma, 0, negativeZero()}
 						if mb, ok := nearestIn(t, a, ub); ok {
 							mbs = append(mbs,
 								mb,
@@ -2644,4 +2699,301 @@ func nonFiniteEqualOracle(t *testing.T, a, b units.Value, tol float64) bool {
 		return true
 	}
 	return equalOracle(t, a, b, tol)
+}
+
+// negativeZero is the float64 whose sign bit is set and whose value is zero: the
+// one number a Value may not carry, and the one an IEEE == cannot tell from +0.
+func negativeZero() float64 { return math.Copysign(0, -1) }
+
+// requirePositiveZerof asserts that got is a zero, and the positive one: a Value
+// never carries a −0, so every zero the package hands back has the bits of +0.
+func requirePositiveZerof(t *testing.T, got float64, format string, args ...any) {
+	t.Helper()
+
+	sameFloat64f(t, 0, got, format, args...)
+}
+
+// zeroPathUnits are pairs of same-kind units chosen to force each of [sum]'s two
+// paths. The fast path is taken where the two operands are already carried in the
+// result's unit — the same factor on both sides, where the addition is a plain IEEE
+// one and (−0) + (−0) is −0 — and the exact-rational path wherever a factor differs,
+// where a rational carries no signed zero at all. Which path runs is an
+// implementation detail, and the two must not disagree about the result.
+func zeroPathUnits() []struct {
+	name     string
+	fast     bool
+	ua, ub   units.Unit
+	ma, mb   float64 // operands that cancel to zero: ma of ua is exactly mb of ub
+	nonzeros bool    // whether those operands are nonzero
+} {
+	return []struct {
+		name     string
+		fast     bool
+		ua, ub   units.Unit
+		ma, mb   float64
+		nonzeros bool
+	}{
+		{"the same unit: the fast path", true, units.Millimeter, units.Millimeter, 2.5, 2.5, true},
+		{"the same factor: the fast path", true, units.One, units.One, 1, 1, true},
+		{"different factors: the exact path", false, units.Millimeter, units.Centimeter, 10, 1, true},
+		{"factors 600 decades apart: the exact path", false, tinyLength, hugeLength, 1e300, 1e-300, true},
+		{"an angle in two units: the exact path", false, units.Degree, units.Radian, 0, 0, false},
+	}
+}
+
+func TestZeroIsAlwaysPositive(t *testing.T) {
+	// A zero result is +0, always. The sign of a zero is not a property of a
+	// quantity — there is no −0 mm — it is a record of how a float64 expression
+	// arrived at zero: which term underflowed, which operand was negated, and which
+	// of two internal paths the arithmetic took. Add and Sub are correctly rounded
+	// from the true sum, and the true sum has one value; a result whose sign bit
+	// depends on whether the operands happened to share a unit is a path made
+	// observable, and no caller can predict it. So it is canonicalised, in every
+	// operation and on construction, and asserted here on the bits: +0 == −0 is true
+	// in IEEE, so no comparison by value can see this.
+
+	t.Run("the reproducer", func(t *testing.T) {
+		// The same subtraction, once with both operands in the unit the result is
+		// carried in — where sum adds them as float64s — and once across units, where
+		// it redoes the arithmetic in exact rationals. Both are zero, and both zeros
+		// are the same float64.
+		fast, err := units.Scalar(negativeZero()).Sub(units.Scalar(0))
+		require.NoError(t, err)
+		requirePositiveZerof(t, fast.Mag(), "(−0) − 0 on the fast path")
+
+		exact, err := units.Millimeters(negativeZero()).Sub(units.Centimeters(0))
+		require.NoError(t, err)
+		requirePositiveZerof(t, exact.Mag(), "(−0) − 0 on the exact path")
+
+		sameFloat64f(t, fast.Mag(), exact.Mag(), "the two paths agree on the sign of a zero")
+
+		// (−0) + (−0) is −0 in IEEE. It is not a quantity of −0 mm.
+		s, err := units.Scalar(negativeZero()).Add(units.Scalar(negativeZero()))
+		require.NoError(t, err)
+		requirePositiveZerof(t, s.Mag(), "(−0) + (−0)")
+
+		// And the negation of a zero, which would otherwise print as "-0" and read as
+		// negative under math.Signbit.
+		n := units.Scalar(0).Neg()
+		requirePositiveZerof(t, n.Mag(), "−(0)")
+		require.False(t, math.Signbit(n.Mag()), "a zero quantity is not negative")
+		require.Equal(t, "0", n.String(), "…and it does not print as one")
+		require.Equal(t, "0 mm", units.Millimeters(0).Neg().String())
+	})
+
+	t.Run("construction", func(t *testing.T) {
+		// A −0 handed to a constructor is a +0 in the Value: no Value anywhere carries
+		// a negative zero, so Mag never returns one and no operation has to defend
+		// against one arriving from the outside.
+		for _, u := range builtinUnits() {
+			requirePositiveZerof(t, units.New(negativeZero(), u).Mag(), "New(−0, %s)", u)
+			requirePositiveZerof(t, units.FromBase(negativeZero(), u).Mag(), "FromBase(−0, %s)", u)
+			requirePositiveZerof(t, units.New(negativeZero(), u).Base(), "New(−0, %s).Base()", u)
+		}
+		for name, v := range map[string]units.Value{
+			"Millimeters": units.Millimeters(negativeZero()),
+			"Meters":      units.Meters(negativeZero()),
+			"Inches":      units.Inches(negativeZero()),
+			"Degrees":     units.Degrees(negativeZero()),
+			"Radians":     units.Radians(negativeZero()),
+			"Scalar":      units.Scalar(negativeZero()),
+			"Kilograms":   units.Kilograms(negativeZero()),
+			"Liters":      units.Liters(negativeZero()),
+		} {
+			requirePositiveZerof(t, v.Mag(), "%s(−0)", name)
+		}
+
+		// FromBase divides by the unit's factor, so a negative quantity too small for
+		// the unit underflows there — to a zero, which is a positive one.
+		requirePositiveZerof(t, units.FromBase(-5e-324, hugeLength).Mag(),
+			"a negative quantity that underflows into a coarse unit")
+	})
+
+	t.Run("Add and Sub, on both paths", func(t *testing.T) {
+		// Every way a sum can be zero — two zeros, either of them negative, and two
+		// nonzero operands that annihilate — at every unit pair, so the fast path and
+		// the exact path are both taken with each.
+		for _, p := range zeroPathUnits() {
+			t.Run(p.name, func(t *testing.T) {
+				require.Equal(t, p.fast, p.ua.Factor() == p.ub.Factor(),
+					"the premise: the operands share the result's unit exactly when the fast path runs")
+
+				zeros := []float64{0, negativeZero()}
+				for _, ma := range zeros {
+					for _, mb := range zeros {
+						a, b := units.New(ma, p.ua), units.New(mb, p.ub)
+
+						s, err := a.Add(b)
+						require.NoError(t, err)
+						requirePositiveZerof(t, s.Mag(), "%s + %s", a, b)
+
+						d, err := a.Sub(b)
+						require.NoError(t, err)
+						requirePositiveZerof(t, d.Mag(), "%s − %s", a, b)
+					}
+				}
+
+				if !p.nonzeros {
+					return
+				}
+
+				// The cancellation: two nonzero quantities that are exactly each other,
+				// so the true difference is zero — the zero the exact path computes as a
+				// rational and the fast path as an IEEE subtraction.
+				a, b := units.New(p.ma, p.ua), units.New(p.mb, p.ub)
+				d, err := a.Sub(b)
+				require.NoError(t, err, "%s − %s", a, b)
+				requirePositiveZerof(t, d.Mag(), "%s − %s cancels", a, b)
+
+				s, err := a.Add(b.Neg())
+				require.NoError(t, err)
+				requirePositiveZerof(t, s.Mag(), "%s + (−%s) cancels", a, b)
+			})
+		}
+	})
+
+	t.Run("the two paths agree", func(t *testing.T) {
+		// The same quantity, written in a unit that forces the fast path and in one
+		// that forces the exact path. Path selection is not something a caller can see:
+		// the two results are the same float64, bit for bit.
+		for _, ma := range []float64{0, negativeZero()} {
+			for _, mb := range []float64{0, negativeZero()} {
+				for _, o := range addSubOps() {
+					fast, err := o.do(units.Millimeters(ma), units.Millimeters(mb))
+					require.NoError(t, err)
+
+					exact, err := o.do(units.Millimeters(ma), units.Centimeters(mb))
+					require.NoError(t, err)
+
+					sameFloat64f(t, fast.Mag(), exact.Mag(),
+						"%v %s %v: the fast path and the exact path give the same zero", ma, o.op, mb)
+				}
+			}
+		}
+	})
+
+	t.Run("the angle/dimensionless carve-out", func(t *testing.T) {
+		// The one arm that crosses kinds, entered from either side: the sum is an angle
+		// whichever operand the angle was, and its zero is a positive zero.
+		for _, ang := range []units.Unit{units.Degree, units.Radian} {
+			for _, ma := range []float64{0, negativeZero()} {
+				for _, mb := range []float64{0, negativeZero()} {
+					for _, o := range addSubOps() {
+						s, err := o.do(units.New(ma, ang), units.Scalar(mb))
+						require.NoError(t, err)
+						require.Equal(t, units.Angle, s.Kind())
+						requirePositiveZerof(t, s.Mag(), "%v %s %s: angle %s scalar", ma, o.op, ang, o.op)
+
+						s, err = o.do(units.Scalar(ma), units.New(mb, ang))
+						require.NoError(t, err)
+						require.Equal(t, units.Angle, s.Kind(), "the sum is an angle whichever side it appeared on")
+						requirePositiveZerof(t, s.Mag(), "%v %s %s: scalar %s angle", ma, o.op, ang, o.op)
+					}
+				}
+			}
+		}
+	})
+
+	t.Run("Neg and Scale", func(t *testing.T) {
+		// Neg must not manufacture a −0 that then leaks into a comparison or a String.
+		for _, u := range builtinUnits() {
+			z := units.New(0, u)
+			requirePositiveZerof(t, z.Neg().Mag(), "−(0 %s)", u)
+			requirePositiveZerof(t, z.Neg().Neg().Mag(), "0 %s negated twice", u)
+			requirePositiveZerof(t, z.Scale(-1).Mag(), "0 %s scaled by −1", u)
+			requirePositiveZerof(t, z.Scale(0).Mag(), "0 %s scaled by 0", u)
+			requirePositiveZerof(t, units.New(2, u).Scale(negativeZero()).Mag(), "2 %s scaled by −0", u)
+			requirePositiveZerof(t, units.New(-2, u).Scale(0).Mag(), "−2 %s scaled by 0", u)
+			require.NotContains(t, z.Neg().String(), "-0", "a zero does not print as a negative one")
+
+			// A product that underflows to nothing is a zero like any other.
+			requirePositiveZerof(t, units.New(-5e-324, u).Scale(5e-324).Mag(), "a product that underflows")
+		}
+	})
+
+	t.Run("Mul, Div, In and Convert", func(t *testing.T) {
+		// Every operation that can produce a zero produces the same one. Mul and Div
+		// carry their result in a base unit, In and Convert in the unit asked for.
+		zero, minus := units.Millimeters(0), units.Millimeters(-3)
+
+		p, err := zero.Mul(minus)
+		require.NoError(t, err)
+		requirePositiveZerof(t, p.Mag(), "0 mm × −3 mm")
+
+		p, err = minus.Mul(zero)
+		require.NoError(t, err)
+		requirePositiveZerof(t, p.Mag(), "−3 mm × 0 mm")
+
+		q, err := zero.Div(minus)
+		require.NoError(t, err)
+		requirePositiveZerof(t, q.Mag(), "0 mm ÷ −3 mm")
+
+		// …including at the ends of the range, where the rational path runs: a true
+		// product too small for the smallest subnormal is a zero, not a signed one.
+		p, err = units.New(-1e-300, tinyLength).Mul(units.New(1e-300, tinyLength))
+		require.NoError(t, err)
+		requirePositiveZerof(t, p.Mag(), "a product that underflows to nothing")
+
+		q, err = units.New(-1e-300, tinyLength).Div(units.New(1e300, hugeLength))
+		require.NoError(t, err)
+		requirePositiveZerof(t, q.Mag(), "a quotient that underflows to nothing")
+
+		for _, u := range unitsOfKind(units.Length) {
+			m, err := zero.In(u)
+			require.NoError(t, err)
+			requirePositiveZerof(t, m, "0 mm in %s", u)
+
+			c, err := zero.Convert(u)
+			require.NoError(t, err)
+			requirePositiveZerof(t, c.Mag(), "0 mm converted to %s", u)
+			requirePositiveZerof(t, c.Base(), "…and its base magnitude")
+		}
+
+		// A negative quantity that no float64 of the target unit can hold converts to a
+		// zero — a positive one, like every other zero the package hands back.
+		m, err := units.Millimeters(-5e-324).In(hugeLength)
+		require.NoError(t, err)
+		requirePositiveZerof(t, m, "a negative length that underflows into a coarse unit")
+
+		requirePositiveZerof(t, units.Metric().In(units.New(-5e-324, tinyLength)),
+			"System.In: the same conversion, with no error to report")
+		requirePositiveZerof(t, units.Metric().Display(units.Millimeters(negativeZero())).Mag(),
+			"System.Display")
+	})
+
+	t.Run("the sweep", func(t *testing.T) {
+		// Every operation, over every unit of every kind, at both zeros and at the
+		// operands that cancel: not one negative zero anywhere in the API.
+		for _, k := range equalSweepKinds() {
+			for _, ua := range equalSweepUnits(k) {
+				for _, ub := range equalSweepUnits(k) {
+					for _, ma := range []float64{0, negativeZero()} {
+						a, b := units.New(ma, ua), units.New(negativeZero(), ub)
+
+						for _, o := range addSubOps() {
+							s, err := o.do(a, b)
+							require.NoError(t, err, "%s %s %s", a, o.op, b)
+							requirePositiveZerof(t, s.Mag(), "%s %s %s", a, o.op, b)
+							requirePositiveZerof(t, s.Base(), "%s %s %s, in base units", a, o.op, b)
+						}
+
+						p, err := a.Mul(units.Scalar(-1))
+						require.NoError(t, err)
+						requirePositiveZerof(t, p.Mag(), "%s × −1", a)
+
+						q, err := a.Div(units.Scalar(-1))
+						require.NoError(t, err)
+						requirePositiveZerof(t, q.Mag(), "%s ÷ −1", a)
+
+						requirePositiveZerof(t, a.Neg().Mag(), "−%s", a)
+						requirePositiveZerof(t, a.Scale(-1).Mag(), "%s scaled by −1", a)
+
+						m, err := a.In(ub)
+						require.NoError(t, err)
+						requirePositiveZerof(t, m, "%s in %s", a, ub)
+					}
+				}
+			}
+		}
+	})
 }

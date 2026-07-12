@@ -293,6 +293,42 @@ magnitude the presentation unit cannot hold comes back as the infinity it is,
 decided on the true value, never as a finite number in the wrong unit and never as
 a `MaxFloat64` two roundings left behind.
 
+### A zero result is a positive zero
+
+**A `Value` never carries a negative zero.** Every zero — one handed to `New` or a
+constructor, one an operation produces, one a conversion hands back — is `+0`, so
+`Mag()` never returns a `-0` and a zero never prints as `-0 mm`.
+
+The sign of an IEEE zero is not a property of the quantity. There is no `-0 mm`; the
+sign bit records how a *float64 expression* arrived at zero — which term underflowed,
+which operand was negated, which of two internal paths ran — and none of that is the
+number the caller asked for. Left uncanonicalised it becomes observable, and the
+contract contradicts itself:
+
+```go
+units.Scalar(math.Copysign(0, -1)).Sub(units.Scalar(0))   // both operands in One: an IEEE addition
+units.Millimeters(math.Copysign(0, -1)).Sub(units.Centimeters(0))  // two factors: exact rationals
+```
+
+`Add` and `Sub` are correctly rounded from the **true sum**, and the true sum of two
+quantities that annihilate is zero — one zero. But an IEEE addition gives `(-0) + (-0)
+= -0` while a rational carries no signed zero at all, so the sign bit of the result
+would say which path `sum` took: the fast one (both operands already in the result's
+unit) or the exact one. **Path selection is an implementation detail and must never be
+visible in the result** — the caller cannot predict which arm a pair of units lands on,
+and nothing about the quantity changed. The same holds for a `product`, a `quotient` or
+a `rescale` whose true value underflows to nothing, and for `Neg`, whose IEEE negation
+of a `+0` would manufacture a `-0` that then leaks into `math.Signbit` and `String()`.
+
+So a zero is canonicalised to `+0` wherever one can arise: in `sum` (both arms, the
+angle/dimensionless carve-out included), `product`, `quotient`, `rescale`, `exact`,
+`Scale`, `Neg`, `Base` — **and on construction**, in `New` and `FromBase` and every
+built-in constructor, which is the simpler contract: no `Value` anywhere carries a
+`-0`, so no operation has to defend against one arriving from the outside. `Equal` is
+unaffected — it reads the magnitudes, and `+0 == -0` in IEEE anyway — which is
+precisely why the suite asserts every exactness claim on `math.Float64bits`, and not
+with `==`.
+
 ### Equality is decided on the true difference
 
 `Equal` has no error channel at all, and it is the sharpest case of the one-helper

@@ -126,6 +126,21 @@ It is a **foundation module**: consumed by `github.com/lestrrat-3d/sketch` and
   typed constants. `Lookup` exists for deserialization only.
 - **NEVER return a naked `float64`** for a quantity that has a unit. That is the
   bug this library exists to prevent.
+- **A zero result is always `+0`; a `Value` NEVER carries a negative zero.** The
+  sign of a zero is not a property of a quantity — there is no `-0 mm` — it records
+  how a float64 expression reached zero, and it must not be observable. `Add`/`Sub`
+  are correctly rounded from the true sum, and the true sum of two quantities that
+  annihilate is *one* zero; but an IEEE addition gives `(-0) + (-0) == -0` while an
+  exact rational carries no signed zero, so an uncanonicalised result would say which
+  path `sum` took — the fast one (both operands already in the result's unit) or the
+  exact one. **An operation's result must never depend on which internal path computed
+  it.** So a zero is canonicalised (`canonicalZero`) wherever one can arise: `sum`
+  (both arms, the angle/dimensionless carve-out included), `product`, `quotient`,
+  `rescale`, `exact`, `Scale`, `Neg`, `Base` — and **on construction**, in `New`,
+  `FromBase` and every built-in constructor, so `Mag()` never returns a `-0`, nothing
+  prints as `-0 mm`, and no operation has to defend against one arriving from outside.
+  The suite asserts it on `math.Float64bits`: in IEEE `+0 == -0`, so **NEVER state an
+  exactness claim about a float64 with `==` or `require.Equal`** — it cannot see this.
 - **A `Value` is immutable.** Operations return a new `Value`. The zero `Value`
   is 0 of `One`: the zero `Unit` is read as `One`, so a `var`-declared `Value`
   behaves as a plain 0 in every operation.
