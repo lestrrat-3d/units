@@ -123,8 +123,11 @@ func TestLookupAndDefine(t *testing.T) {
 	require.True(t, ok, "lookup mm")
 	require.Equal(t, units.Millimeter, u)
 
-	yard := units.Define("yd", units.Length, 914.4)
-	u, ok = units.Lookup("yd")
+	// The symbol is minted fresh (the registry is append-only), so the Define
+	// succeeds on every run of this test in the process.
+	symbol := uniqueSymbol(t, "yd")
+	yard := units.Define(symbol, units.Length, 914.4)
+	u, ok = units.Lookup(symbol)
 	require.True(t, ok, "lookup yd")
 	require.Equal(t, yard, u)
 
@@ -134,7 +137,7 @@ func TestLookupAndDefine(t *testing.T) {
 
 	// Redefining a symbol would change the meaning of every value naming it.
 	require.Panics(t, func() { units.Define("mm", units.Length, 2) }, "redefining a built-in")
-	require.Panics(t, func() { units.Define("yd", units.Length, 914.4) }, "redefining a custom unit")
+	require.Panics(t, func() { units.Define(symbol, units.Length, 914.4) }, "redefining a custom unit")
 }
 
 // builtinUnits lists every unit the package itself registers.
@@ -427,8 +430,9 @@ func TestDefineRejectsBadFactor(t *testing.T) {
 		})
 	}
 
-	// A positive, finite factor is fine, however small or large.
-	u := units.Define("zz-ok", units.Length, 1e-9)
+	// A positive, finite factor is fine, however small or large. The symbol is
+	// minted fresh, so the Define succeeds on every run of this test.
+	u := units.Define(uniqueSymbol(t, "zz-ok"), units.Length, 1e-9)
 	require.InDelta(t, 1e-9, u.Factor(), 0)
 }
 
@@ -467,10 +471,12 @@ func TestDefineRejectsOverflowedKind(t *testing.T) {
 	}
 
 	// The kind that merely looks exotic is not the kind that overflowed: an L¹²⁰ is
-	// an int8 exponent, and a unit of it registers as any other does.
+	// an int8 exponent, and a unit of it registers as any other does. The symbol is
+	// minted fresh, so the Define succeeds on every run of this test.
 	require.False(t, units.Length.Pow(120).Overflowed())
-	u := units.Define("zz-L120b", units.Length.Pow(120), 1)
-	got, ok := units.Lookup("zz-L120b")
+	symbol := uniqueSymbol(t, "zz-L120b")
+	u := units.Define(symbol, units.Length.Pow(120), 1)
+	got, ok := units.Lookup(symbol)
 	require.True(t, ok)
 	require.Equal(t, u, got)
 }
@@ -480,6 +486,10 @@ func TestRegistryConcurrent(t *testing.T) {
 	// register its units from one goroutine while another deserializes symbols, so
 	// the registry is guarded; run under -race, this is the proof.
 	const n = 64
+
+	// The stem is minted fresh, so the n definitions land on symbols no earlier
+	// run of this test in the process has taken.
+	stem := uniqueSymbol(t, "zz-race") + "-"
 
 	// Assertions belong to the test goroutine, so the readers report what they saw
 	// rather than failing from a goroutine of their own.
@@ -491,12 +501,12 @@ func TestRegistryConcurrent(t *testing.T) {
 
 		go func() {
 			defer wg.Done()
-			units.Define("zz-race-"+strconv.Itoa(i), units.Length, float64(i)+1)
+			units.Define(stem+strconv.Itoa(i), units.Length, float64(i)+1)
 		}()
 		go func() {
 			defer wg.Done()
 			u, _ := units.Lookup("mm")
-			units.Lookup("zz-race-" + strconv.Itoa(i)) // may or may not be defined yet
+			units.Lookup(stem + strconv.Itoa(i)) // may or may not be defined yet
 			seen <- u
 		}()
 		go func() {
@@ -514,7 +524,7 @@ func TestRegistryConcurrent(t *testing.T) {
 	}
 
 	for i := range n {
-		u, ok := units.Lookup("zz-race-" + strconv.Itoa(i))
+		u, ok := units.Lookup(stem + strconv.Itoa(i))
 		require.True(t, ok, "every concurrently defined unit is registered")
 		require.InDelta(t, float64(i)+1, u.Factor(), 0)
 	}
@@ -1977,7 +1987,8 @@ func TestOverflowBoundaryIsDecided(t *testing.T) {
 		// MaxFloat64 × (1e-300 × 1e300): the two factors multiply to a shade over 1,
 		// which is all it takes to carry the last float64 past the end of the range.
 		// The product is an infinity, and no finite magnitude may be handed back for it.
-		huge := units.Define("boundary_huge_len", units.Length, 1e300)
+		// The symbol is minted fresh, so the Define succeeds on every run of this test.
+		huge := units.Define(uniqueSymbol(t, "boundary_huge_len"), units.Length, 1e300)
 		v, err := units.Scalar(1e-300).Mul(units.New(math.MaxFloat64, huge))
 		require.ErrorIs(t, err, units.ErrNotFinite, "the true product is past the last float64")
 		require.Equal(t, units.Value{}, v, "no value escapes with the error")

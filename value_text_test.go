@@ -7,6 +7,7 @@ import (
 	"math/rand/v2"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"unicode"
 	"unicode/utf8"
@@ -22,6 +23,21 @@ var (
 	carat  = units.Define("ct", units.Mass, 0.0002)
 	grad   = units.Define("grad", units.Angle, math.Pi/200)
 )
+
+// symbolSerial backs uniqueSymbol. It is package-global so every mint in the
+// process — across tests, subtests and repeated runs of the same test in one
+// binary — hands out a serial no earlier mint did.
+var symbolSerial atomic.Int64
+
+// uniqueSymbol returns base carrying a serial suffix ("furlong~7") that no other
+// call in this process has handed out. The registry is append-only for the life
+// of the binary, so a test that registers a symbol at run time derives it here:
+// the symbol is fresh — unknown before its Define and registrable by it — however
+// many times the test runs in one process.
+func uniqueSymbol(t *testing.T, base string) string {
+	t.Helper()
+	return base + "~" + strconv.FormatInt(symbolSerial.Add(1), 10)
+}
 
 // textMags is the magnitude sweep the round trip is asserted over: the numbers a
 // caller writes, and the ones a float64 barely holds. Both zeros are in it — a −0
@@ -530,11 +546,14 @@ func TestValueTextDefinedUnits(t *testing.T) {
 
 	// A unit defined after a document was written resolves once its Define has run —
 	// and not before, which is the honest answer for a symbol the process cannot name.
+	// The symbol is minted fresh, so it is unknown here on every run of this test.
+	symbol := uniqueSymbol(t, "furlong")
+	text := []byte("3 " + symbol)
 	var v units.Value
-	require.ErrorIs(t, v.UnmarshalText([]byte("3 furlong")), units.ErrUnknownUnit)
+	require.ErrorIs(t, v.UnmarshalText(text), units.ErrUnknownUnit)
 
-	furlong := units.Define("furlong", units.Length, 201168)
-	require.NoError(t, v.UnmarshalText([]byte("3 furlong")))
+	furlong := units.Define(symbol, units.Length, 201168)
+	require.NoError(t, v.UnmarshalText(text))
 	require.Equal(t, furlong, v.Unit())
 	sameFloat64f(t, 3, v.Mag(), "3 furlong")
 	sameFloat64f(t, 603504, v.Base(), "3 furlong in mm")
@@ -715,9 +734,12 @@ func unregistrable(symbol string) bool {
 // whatever it accepts — which is the assertion a suite of hand-picked *safe* symbols
 // cannot make.
 //
-// Each carries a "~" and its index, so a generated symbol collides with nothing else the
-// suite registers, or asserts is unregistered; the hostility is in everything around it.
-func hostileSymbols(n int) []string {
+// Each carries the run marker and its index. No fragment holds a "~", so the marker is
+// a generated symbol's only pair of tildes: within a run the index keeps the symbols
+// apart from each other and from everything else the suite registers, and across runs a
+// fresh marker (uniqueSymbol) keeps them apart from every symbol an earlier run of the
+// sweep registered in this process. The hostility is in everything around it.
+func hostileSymbols(n int, run string) []string {
 	r := rand.New(rand.NewPCG(0xba5e, 0x5717b0))
 	pick := func(length int) string {
 		var b strings.Builder
@@ -738,7 +760,7 @@ func hostileSymbols(n int) []string {
 		// The marker sits at a random place in the junk, so a hostile rune — a space, a
 		// bracket — lands at the front and at the back as often as it lands in the middle.
 		head := r.IntN(length + 1)
-		symbol := pick(head) + "~" + strconv.Itoa(i) + pick(length-head)
+		symbol := pick(head) + run + "~" + strconv.Itoa(i) + pick(length-head)
 		if _, dup := seen[symbol]; dup {
 			continue
 		}
@@ -769,11 +791,7 @@ func TestValueTextRoundTripOverHostileSymbols(t *testing.T) {
 	// the encoders' reach are made to agree at Define, so the symbols here are the ones a
 	// hand-written table would not have thought of.
 	accepted, rejected := 0, 0
-	for _, symbol := range hostileSymbols(8000) {
-		if _, taken := units.Lookup(symbol); taken {
-			continue // already a unit; Define would panic on the duplicate, which is not the property
-		}
-
+	for _, symbol := range hostileSymbols(8000, uniqueSymbol(t, "")) {
 		u, ok := tryDefine(symbol, units.Length, 3)
 		if !ok {
 			rejected++
