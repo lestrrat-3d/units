@@ -2,6 +2,7 @@ package units_test
 
 import (
 	"math"
+	"math/big"
 	"strconv"
 	"sync"
 	"testing"
@@ -787,4 +788,432 @@ func TestConversionNotFinite(t *testing.T) {
 	// A cross-kind conversion is still ErrIncompatible, not ErrNotFinite.
 	_, err = units.New(math.Inf(1), units.Meter).In(units.Degree)
 	require.ErrorIs(t, err, units.ErrIncompatible)
+}
+
+// turn is an ordinary application-defined unit: one revolution, 2π radians. A
+// magnitude in it that float64 holds easily has a base magnitude (in radians)
+// that it does not.
+var turn = units.Define("turn", units.Angle, 2*math.Pi)
+
+func TestBaseMagnitudeIsNeverAnIntermediate(t *testing.T) {
+	// Meters(1e307) is an ordinary length: a finite magnitude in a built-in unit.
+	// Its base magnitude — 1e310 mm — is +Inf, because float64 stops at ~1.8e308.
+	// It is the result of an operation that has to be representable, never an
+	// intermediate, so no operation may route through Value.Base.
+	huge := units.Meters(1e307)
+	require.True(t, math.IsInf(huge.Base(), 1), "the premise: an ordinary value whose base magnitude overflows")
+
+	t.Run("In: a value in the unit it already carries", func(t *testing.T) {
+		m, err := huge.In(units.Meter)
+		require.NoError(t, err, "a value is always expressible in its own unit")
+		require.Equal(t, 1e307, m)
+	})
+
+	t.Run("In: a conversion whose result is representable", func(t *testing.T) {
+		// 1e310 mm is 3.28e307 ft — comfortably in range, though the base is not.
+		m, err := huge.In(units.Foot)
+		require.NoError(t, err)
+		require.InEpsilon(t, 1e307*(1000.0/304.8), m, 1e-12)
+	})
+
+	t.Run("Convert: the same, carried in the unit", func(t *testing.T) {
+		c, err := huge.Convert(units.Meter)
+		require.NoError(t, err)
+		require.Equal(t, units.Meter, c.Unit())
+		require.Equal(t, 1e307, c.Mag())
+	})
+
+	t.Run("Div: a value divided by itself is 1", func(t *testing.T) {
+		q, err := huge.Div(huge)
+		require.NoError(t, err)
+		require.Equal(t, units.Dimensionless, q.Kind())
+		require.Equal(t, 1.0, q.Mag())
+	})
+
+	t.Run("Mul: a huge length by a tiny one", func(t *testing.T) {
+		// 1e310 mm × 1e-300 mm is 1e10 mm² — an unremarkable area.
+		p, err := huge.Mul(units.Millimeters(1e-300))
+		require.NoError(t, err)
+		require.Equal(t, units.Area, p.Kind())
+		require.Equal(t, units.SquareMillimeter, p.Unit())
+		require.InEpsilon(t, 1e10, p.Mag(), 1e-12)
+	})
+
+	t.Run("Equal: a value equals itself", func(t *testing.T) {
+		// Equal has no error channel, so an overflowed base magnitude would not
+		// even be reported: |Inf − Inf| is NaN, and NaN <= tol is false.
+		require.True(t, huge.Equal(huge, 1e-9))
+		require.True(t, huge.Equal(units.Meters(1e307), 0), "…at a tolerance of zero")
+		// …and across units, where both base magnitudes overflow: 1e307 m is
+		// 3.28e307 ft, and the two agree to a tolerance that is minuscule beside
+		// the 1e310 mm quantity itself.
+		require.True(t, units.Meters(1e307).Equal(units.Feet(1e307*(1000.0/304.8)), 1e300))
+		require.False(t, huge.Equal(units.Meters(-1e307), 1e9), "…while its negation is still not equal to it")
+	})
+
+	t.Run("Add: the angle/scalar carve-out", func(t *testing.T) {
+		// 1e308 turns is 6.28e308 rad: +Inf. Adding a radian to it changes nothing,
+		// and must not fail.
+		rev := units.New(1e308, turn)
+		require.True(t, math.IsInf(rev.Base(), 1), "the premise")
+
+		s, err := rev.Add(units.Scalar(1))
+		require.NoError(t, err)
+		require.Equal(t, units.Angle, s.Kind(), "angle + scalar is an angle")
+		require.Equal(t, turn, s.Unit(), "…carried in the angle's own unit")
+		require.Equal(t, 1e308, s.Mag(), "a radian is far below the last ulp of 1e308 turns")
+
+		s, err = units.Scalar(1).Add(rev)
+		require.NoError(t, err)
+		require.Equal(t, units.Angle, s.Kind(), "scalar + angle is an angle whichever side it appeared on")
+		require.Equal(t, turn, s.Unit())
+		require.Equal(t, 1e308, s.Mag())
+
+		// The same arm with an angle on both sides was already ratio-first.
+		s, err = rev.Add(units.Radians(1))
+		require.NoError(t, err)
+		require.Equal(t, 1e308, s.Mag())
+	})
+
+	t.Run("System.In and System.Display", func(t *testing.T) {
+		// Metric presents a length in millimetres. 1e307 m is 1e310 mm, which no
+		// float64 holds — so the number must not come back as 1e307, which the
+		// caller would read as 1e307 mm: finite, wrong by a factor of 1000, silent.
+		require.True(t, math.IsInf(units.Metric().In(huge), 1),
+			"an unrepresentable magnitude is an infinity, never a finite number in the wrong unit")
+
+		// The representable ones come back in the system's unit, as always.
+		require.Equal(t, 1e307, units.SI().In(huge), "SI presents a length in metres")
+		require.InEpsilon(t, 2000.0, units.Metric().In(units.Meters(2)), 1e-12)
+
+		// Display cannot carry the quantity in millimetres, so it hands back the
+		// value it was given rather than a relabelled magnitude.
+		d := units.Metric().Display(huge)
+		require.Equal(t, units.Length, d.Kind())
+		require.Equal(t, units.Meter, d.Unit())
+		require.Equal(t, 1e307, d.Mag())
+
+		require.Equal(t, units.Millimeter, units.Metric().Display(units.Meters(2)).Unit())
+	})
+}
+
+// The oracle for the sweep below: exact rational arithmetic. A float64 magnitude
+// and a float64 factor are both exact rationals, so their product is the true
+// quantity a Value denotes — whether or not float64 can hold it.
+var (
+	maxFloat   = new(big.Rat).SetFloat64(math.MaxFloat64)
+	halfMax    = new(big.Rat).Quo(maxFloat, big.NewRat(2, 1))
+	twiceMax   = new(big.Rat).Mul(maxFloat, big.NewRat(2, 1))
+	relTol     = big.NewRat(1, 1e9)
+	subnormalF = new(big.Rat).SetFloat64(1e-310)
+)
+
+// baseRat returns v's base magnitude exactly.
+func baseRat(t *testing.T, v units.Value) *big.Rat {
+	t.Helper()
+
+	m := new(big.Rat).SetFloat64(v.Mag())
+	require.NotNil(t, m, "the matrix holds finite magnitudes only")
+	f := new(big.Rat).SetFloat64(v.Unit().Factor())
+	require.NotNil(t, f, "a unit factor is finite")
+	return new(big.Rat).Mul(m, f)
+}
+
+func ratOf(t *testing.T, x float64) *big.Rat {
+	t.Helper()
+
+	r := new(big.Rat).SetFloat64(x)
+	require.NotNil(t, r, "%v is finite", x)
+	return r
+}
+
+// requireClose asserts that got is the float64 rendering of want, to a relative
+// tolerance — with an absolute floor, because a true result down among the
+// subnormals has no relative precision left to compare against.
+func requireClose(t *testing.T, got float64, want *big.Rat) {
+	t.Helper()
+
+	g := new(big.Rat).SetFloat64(got)
+	require.NotNil(t, g, "the true result %s is representable, so the result is finite: got %v",
+		want.FloatString(3), got)
+
+	diff := new(big.Rat).Abs(new(big.Rat).Sub(g, want))
+	tol := new(big.Rat).Mul(new(big.Rat).Abs(want), relTol)
+	tol.Add(tol, subnormalF)
+	require.LessOrEqual(t, diff.Cmp(tol), 0, "want %s, got %v", want.FloatString(3), got)
+}
+
+// requireResult asserts the contract of an operation that can report an error:
+// the true result whenever float64 can hold it, and ErrNotFinite only when it
+// genuinely cannot. Within a factor of two of MaxFloat64 the rounding decides,
+// so either answer is honest there.
+func requireResult(t *testing.T, got float64, err error, want *big.Rat) {
+	t.Helper()
+
+	abs := new(big.Rat).Abs(want)
+	switch {
+	case abs.Cmp(halfMax) <= 0:
+		require.NoError(t, err, "the true result %s is representable", want.FloatString(3))
+		requireClose(t, got, want)
+	case abs.Cmp(twiceMax) >= 0:
+		require.ErrorIs(t, err, units.ErrNotFinite, "the true result %s overflows float64", want.FloatString(3))
+	case err != nil:
+		require.ErrorIs(t, err, units.ErrNotFinite)
+	default:
+		requireClose(t, got, want)
+	}
+}
+
+// requireFloat asserts the same contract for an operation with no error to
+// report: the true result where float64 holds it, an infinity of the right sign
+// where it does not — never a finite number that is not the quantity asked for.
+func requireFloat(t *testing.T, got float64, want *big.Rat) {
+	t.Helper()
+
+	abs := new(big.Rat).Abs(want)
+	switch {
+	case abs.Cmp(halfMax) <= 0:
+		requireClose(t, got, want)
+	case abs.Cmp(twiceMax) >= 0:
+		require.True(t, math.IsInf(got, want.Sign()),
+			"the true result %s overflows float64, so it comes back as an infinity: got %v",
+			want.FloatString(3), got)
+	case !math.IsInf(got, 0):
+		requireClose(t, got, want)
+	}
+}
+
+// extremes is the sweep matrix: every value in it is ordinary — a finite
+// magnitude in a real unit, the kind of thing any caller can build — and several
+// of them have a base magnitude that overflows float64 on its own.
+func extremes() []units.Value {
+	return []units.Value{
+		{}, // the zero Value: 0 of One
+		units.Scalar(1),
+		units.Scalar(math.MaxFloat64),
+		units.Millimeters(5e-324), // the smallest subnormal
+		units.Millimeters(1e-300),
+		units.Millimeters(math.MaxFloat64),
+		units.Meters(1e307),
+		units.Meters(-1e307),
+		units.Meters(math.MaxFloat64),
+		units.Thous(1e-300),
+		units.Inches(-1e305),
+		units.Degrees(90),
+		units.Radians(1),
+		units.New(1e308, turn),
+		units.New(-1e308, turn),
+		units.Kilograms(1e300),
+		units.SquareMeters(1e300),
+		units.CubicMillimeters(5e-324),
+	}
+}
+
+// unitsOfKind lists the units the sweep converts through, per kind.
+func unitsOfKind(k units.Kind) []units.Unit {
+	switch k {
+	case units.Length:
+		return []units.Unit{units.Millimeter, units.Centimeter, units.Meter, units.Inch, units.Foot, units.Thou}
+	case units.Angle:
+		return []units.Unit{units.Radian, units.Degree, turn}
+	case units.Mass:
+		return []units.Unit{units.Kilogram, units.Gram, units.Pound}
+	case units.Area:
+		return []units.Unit{units.SquareMillimeter, units.SquareMeter, units.SquareInch}
+	case units.Volume:
+		return []units.Unit{units.CubicMillimeter, units.CubicCentimeter, units.Liter}
+	case units.Dimensionless:
+		return []units.Unit{units.One}
+	}
+	return nil
+}
+
+// TestExtremeMatrix sweeps every exported operation over the matrix, against an
+// exact-rational oracle. It is the class-level guard: an operation that formed a
+// base magnitude as an intermediate — a magnitude times its unit's factor, which
+// overflows for an ordinary operand such as Meters(1e307) — would fail here,
+// whichever operation it was.
+func TestExtremeMatrix(t *testing.T) {
+	t.Run("In and Convert", func(t *testing.T) {
+		for _, v := range extremes() {
+			// The identity conversion is exact: a value is expressible in the unit
+			// it already carries, whatever its base magnitude.
+			m, err := v.In(v.Unit())
+			require.NoError(t, err, "%s in its own unit", v)
+			require.Equal(t, v.Mag(), m, "%s in its own unit is its own magnitude", v)
+
+			for _, u := range unitsOfKind(v.Kind()) {
+				want := new(big.Rat).Quo(baseRat(t, v), ratOf(t, u.Factor()))
+
+				m, err := v.In(u)
+				requireResult(t, m, err, want)
+
+				c, cerr := v.Convert(u)
+				if err != nil {
+					require.ErrorIs(t, cerr, units.ErrNotFinite, "Convert fails exactly where In does: %s in %s", v, u)
+					require.Equal(t, units.Value{}, c, "no value escapes with the error")
+					continue
+				}
+				require.NoError(t, cerr)
+				require.Equal(t, u, c.Unit(), "Convert carries the target unit")
+				require.Equal(t, m, c.Mag(), "Convert agrees with In: %s in %s", v, u)
+			}
+		}
+	})
+
+	t.Run("Add and Sub", func(t *testing.T) {
+		for _, a := range extremes() {
+			for _, b := range extremes() {
+				sameKind := a.Kind() == b.Kind()
+				carveOut := (a.Kind() == units.Angle && b.Kind() == units.Dimensionless) ||
+					(a.Kind() == units.Dimensionless && b.Kind() == units.Angle)
+
+				if !sameKind && !carveOut {
+					_, err := a.Add(b)
+					require.ErrorIs(t, err, units.ErrIncompatible, "%s + %s", a, b)
+					_, err = a.Sub(b)
+					require.ErrorIs(t, err, units.ErrIncompatible, "%s - %s", a, b)
+					continue
+				}
+
+				// The sum is carried in a's unit — except in the carve-out entered
+				// from the dimensionless side, where it is carried in b's.
+				u := a.Unit()
+				if a.Kind() == units.Dimensionless && b.Kind() == units.Angle {
+					u = b.Unit()
+				}
+				f := ratOf(t, u.Factor())
+
+				for _, op := range []struct {
+					name string
+					sign int
+					do   func(units.Value, units.Value) (units.Value, error)
+				}{
+					{"add", 1, units.Value.Add},
+					{"sub", -1, units.Value.Sub},
+				} {
+					ob := baseRat(t, b)
+					if op.sign < 0 {
+						ob = new(big.Rat).Neg(ob)
+					}
+					want := new(big.Rat).Quo(new(big.Rat).Add(baseRat(t, a), ob), f)
+
+					r, err := op.do(a, b)
+					requireResult(t, r.Mag(), err, want)
+					if err != nil {
+						require.Equal(t, units.Value{}, r, "no value escapes with the error")
+						continue
+					}
+					require.Equal(t, u, r.Unit(), "%s: %s %s %s", op.name, a, op.name, b)
+					require.Equal(t, u.Kind(), r.Kind())
+				}
+			}
+		}
+	})
+
+	t.Run("Mul", func(t *testing.T) {
+		for _, a := range extremes() {
+			for _, b := range extremes() {
+				want := new(big.Rat).Mul(baseRat(t, a), baseRat(t, b))
+
+				p, err := a.Mul(b)
+				requireResult(t, p.Mag(), err, want)
+				if err != nil {
+					require.Equal(t, units.Value{}, p, "no value escapes with the error")
+					continue
+				}
+				require.Equal(t, a.Kind().Mul(b.Kind()), p.Kind(), "%s x %s", a, b)
+				require.InDelta(t, 1, p.Unit().Factor(), 0, "a product is carried in a factor-1 unit")
+			}
+		}
+	})
+
+	t.Run("Div", func(t *testing.T) {
+		for _, a := range extremes() {
+			for _, b := range extremes() {
+				q, err := a.Div(b)
+
+				// A divisor whose base magnitude is zero — genuinely, or by
+				// underflow — is a division by zero, not an infinity.
+				if b.Base() == 0 {
+					require.ErrorIs(t, err, units.ErrDivideByZero, "%s / %s", a, b)
+					continue
+				}
+
+				want := new(big.Rat).Quo(baseRat(t, a), baseRat(t, b))
+				requireResult(t, q.Mag(), err, want)
+				if err != nil {
+					require.Equal(t, units.Value{}, q, "no value escapes with the error")
+					continue
+				}
+				require.Equal(t, a.Kind().Div(b.Kind()), q.Kind(), "%s / %s", a, b)
+				require.InDelta(t, 1, q.Unit().Factor(), 0, "a quotient is carried in a factor-1 unit")
+			}
+		}
+	})
+
+	t.Run("Equal is reflexive", func(t *testing.T) {
+		for _, v := range extremes() {
+			for _, tol := range []float64{0, 1e-9, 1e300, math.MaxFloat64} {
+				require.True(t, v.Equal(v, tol), "%s equals itself at tol %v", v, tol)
+				require.True(t, units.New(v.Mag(), v.Unit()).Equal(v, tol),
+					"…and so does a value rebuilt from its own magnitude and unit")
+			}
+
+			// …and it is symmetric, and never equal across kinds.
+			for _, o := range extremes() {
+				require.Equal(t, v.Equal(o, 1e-9), o.Equal(v, 1e-9), "Equal is symmetric: %s, %s", v, o)
+				if v.Kind() != o.Kind() {
+					require.False(t, v.Equal(o, math.MaxFloat64), "%s is not a %s", v.Kind(), o.Kind())
+				}
+			}
+		}
+	})
+
+	t.Run("Scale and Neg", func(t *testing.T) {
+		for _, v := range extremes() {
+			require.Equal(t, -v.Mag(), v.Neg().Mag(), "%s negates", v)
+			require.Equal(t, v.Unit(), v.Neg().Unit(), "…in its own unit")
+			require.True(t, v.Neg().Neg().Equal(v, 0), "…and negating twice is the identity")
+
+			require.Equal(t, v.Mag(), v.Scale(1).Mag(), "scaling by 1 is the identity")
+			require.True(t, v.Scale(1).Equal(v, 0))
+			require.Equal(t, v.Kind(), v.Scale(2).Kind(), "scaling keeps the kind")
+		}
+	})
+
+	t.Run("System", func(t *testing.T) {
+		for _, sys := range []units.System{units.Metric(), units.SI(), units.Imperial(), {}} {
+			for _, v := range extremes() {
+				u := sys.UnitFor(v.Kind())
+				want := new(big.Rat).Quo(baseRat(t, v), ratOf(t, u.Factor()))
+
+				// In always answers in u — an unrepresentable magnitude as the
+				// infinity it is, never as a finite number in some other unit.
+				requireFloat(t, sys.In(v), want)
+
+				d := sys.Display(v)
+				require.Equal(t, v.Kind(), d.Kind(), "Display preserves the kind: %s", v)
+				if _, err := v.In(u); err != nil {
+					require.Equal(t, v.Unit(), d.Unit(), "a value it cannot carry in u comes back unchanged")
+					require.Equal(t, v.Mag(), d.Mag())
+					continue
+				}
+				require.Equal(t, u, d.Unit(), "Display carries the system's unit: %s", v)
+				requireFloat(t, d.Mag(), want)
+			}
+
+			// The FromBase wrappers land on the kind they name, and on the
+			// magnitude the system's unit gives that base.
+			for _, base := range []float64{0, 1, math.Pi, -1e300, 5e-324, 1e307, math.MaxFloat64} {
+				l := sys.LengthFromBase(base)
+				require.Equal(t, units.Length, l.Kind())
+				requireFloat(t, l.Mag(), new(big.Rat).Quo(ratOf(t, base), ratOf(t, sys.UnitFor(units.Length).Factor())))
+
+				a := sys.AngleFromBase(base)
+				require.Equal(t, units.Angle, a.Kind())
+				requireFloat(t, a.Mag(), new(big.Rat).Quo(ratOf(t, base), ratOf(t, sys.UnitFor(units.Angle).Factor())))
+			}
+		}
+	})
 }

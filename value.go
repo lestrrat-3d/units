@@ -22,6 +22,11 @@ var ErrDivideByZero = errors.New("units: division by zero")
 // infinity and never a NaN, because a non-finite magnitude carries a registered
 // symbol and so would persist as if it were a real quantity.
 //
+// It is the result that must be representable, never an intermediate: an operand
+// whose own base magnitude overflows — [Meters](1e307), whose [Value.Base] is
+// +Inf — is an ordinary operand, and an operation on it whose result is in range
+// returns that result.
+//
 // The operations that cannot report an error — [New], [FromBase], [Value.Scale]
 // and [Value.Neg] — do not check: a caller that hands them an infinity, or that
 // scales a value up past the float64 range, gets a non-finite Value back.
@@ -95,16 +100,24 @@ func (v Value) Kind() Kind { return v.unit.kind }
 
 // Base returns the magnitude expressed in the kind's base unit (mm for a
 // length, mm² for an area, rad for an angle).
+//
+// It is an accessor, not an operation, and it is the one place a base magnitude
+// is formed: the product of an ordinary magnitude and its unit's factor can
+// overflow on its own — [Meters](1e307) is an ordinary length whose base
+// magnitude is +Inf — so Base honestly reports that infinity. No operation on a
+// [Value] forms one, so none of them inherits that overflow; see [rescale].
 func (v Value) Base() float64 { return v.mag * v.Unit().factor }
 
 // In returns the magnitude expressed in unit u, or [ErrIncompatible] if u
 // measures a different kind. A magnitude that is not finite in u — a value built
-// from an infinity, or one whose conversion overflows — is [ErrNotFinite].
+// from an infinity, or one whose conversion genuinely overflows — is
+// [ErrNotFinite]. A value is always expressible in the unit it already carries,
+// however large its base magnitude.
 func (v Value) In(u Unit) (float64, error) {
 	if v.unit.kind != u.kind {
 		return 0, fmt.Errorf("%w: cannot express %s in %s", ErrIncompatible, v.unit.kind, u.kind)
 	}
-	m := v.Base() / u.Factor()
+	m := rescale(v.mag, v.Unit().factor, u.Factor())
 	if !isFinite(m) {
 		return 0, fmt.Errorf("%w: cannot express %s in %s", ErrNotFinite, v, u)
 	}
@@ -140,26 +153,28 @@ func (v Value) Sub(o Value) (Value, error) { return v.combine(o, -1) }
 func (v Value) combine(o Value, sign float64) (Value, error) {
 	vu, ou := v.Unit(), o.Unit()
 
-	var r Value
-	switch {
-	case vu.kind == ou.kind:
-		// The ratio of the factors first: o's magnitude times o's factor can
-		// overflow on its own, even where the sum itself is representable.
-		r = Value{v.mag + sign*o.mag*(ou.factor/vu.factor), vu}
-	case isAngleScalarPair(vu.kind, ou.kind):
-		u := vu
+	// The sum is carried in v's unit, except in the angle/dimensionless carve-out
+	// entered from the dimensionless side, where it is carried in o's — so the
+	// sum is an angle whichever operand the angle was.
+	u := vu
+	if vu.kind != ou.kind {
+		if !isAngleScalarPair(vu.kind, ou.kind) {
+			return Value{}, fmt.Errorf("%w: cannot combine %s with %s", ErrIncompatible, v.unit.kind, o.unit.kind)
+		}
 		if vu.kind == Dimensionless {
 			u = ou
 		}
-		r = FromBase(v.Base()+sign*o.Base(), u)
-	default:
-		return Value{}, fmt.Errorf("%w: cannot combine %s with %s", ErrIncompatible, v.unit.kind, o.unit.kind)
 	}
 
-	if !isFinite(r.mag) {
+	// Each operand is rescaled into u by the ratio of the factors, never through
+	// its own base magnitude: either magnitude times its own factor can overflow
+	// on its own, even where the sum is representable. The operand already
+	// carried in u rescales by exactly 1.
+	m := rescale(v.mag, vu.factor, u.factor) + sign*rescale(o.mag, ou.factor, u.factor)
+	if !isFinite(m) {
 		return Value{}, fmt.Errorf("%w: cannot combine %s with %s", ErrNotFinite, v, o)
 	}
-	return r, nil
+	return Value{m, u}, nil
 }
 
 // isAngleScalarPair reports whether a and b are an angle and a dimensionless
@@ -170,12 +185,14 @@ func isAngleScalarPair(a, b Kind) bool {
 
 // Mul returns v × o: the magnitudes multiplied in base units, and the kinds
 // composed. Millimeters(2).Mul(Millimeters(3)) is 6 mm², an [Area]. The result
-// is carried in the base unit of the resulting kind.
+// is carried in the base unit of the resulting kind (whose factor is 1, so the
+// product is the result's magnitude).
 //
-// The product is always finite: operands large enough to overflow it to an
-// infinity, or to make it a NaN, are [ErrNotFinite].
+// The product is finite whenever the product itself is representable — an
+// operand whose own base magnitude overflows is no obstacle. A product that
+// genuinely overflows to an infinity, or that is a NaN, is [ErrNotFinite].
 func (v Value) Mul(o Value) (Value, error) {
-	p := v.Base() * o.Base()
+	p := product(v.mag, v.Unit().factor, o.mag, o.Unit().factor)
 	if !isFinite(p) {
 		return Value{}, fmt.Errorf("%w: cannot multiply %s by %s", ErrNotFinite, v, o)
 	}
@@ -184,16 +201,22 @@ func (v Value) Mul(o Value) (Value, error) {
 
 // Div returns v ÷ o: the magnitudes divided in base units, and the kinds
 // composed. Volume divided by Area is a [Length]. The result is carried in the
-// base unit of the resulting kind.
+// base unit of the resulting kind (whose factor is 1, so the quotient is the
+// result's magnitude).
 //
-// The quotient is always finite: a zero base magnitude in the divisor is
-// [ErrDivideByZero], and a divisor small enough — or a dividend large enough —
-// to blow the quotient up to an infinity or a NaN is [ErrNotFinite].
+// The quotient is finite whenever the quotient itself is representable — a value
+// divided by itself is 1 however large its base magnitude. A zero base magnitude
+// in the divisor is [ErrDivideByZero], and a divisor small enough — or a
+// dividend large enough — to blow the quotient up to an infinity or a NaN is
+// [ErrNotFinite].
 func (v Value) Div(o Value) (Value, error) {
+	// The one thing an overflowing base magnitude cannot corrupt is whether it is
+	// zero, so the divisor's guard may read it: an infinity is not zero, and a
+	// base that underflows to zero is a zero divisor by contract.
 	if o.Base() == 0 {
 		return Value{}, fmt.Errorf("%w: cannot divide %s by %s", ErrDivideByZero, v, o)
 	}
-	q := v.Base() / o.Base()
+	q := quotient(v.mag, v.Unit().factor, o.mag, o.Unit().factor)
 	if !isFinite(q) {
 		return Value{}, fmt.Errorf("%w: cannot divide %s by %s", ErrNotFinite, v, o)
 	}
@@ -202,6 +225,50 @@ func (v Value) Div(o Value) (Value, error) {
 
 // isFinite reports whether x is a real number: neither an infinity nor a NaN.
 func isFinite(x float64) bool { return !math.IsInf(x, 0) && !math.IsNaN(x) }
+
+// The three helpers below are how every operation on a [Value] does its
+// arithmetic, and no operation may bypass them by forming a base magnitude
+// ([Value.Base], a magnitude times its unit's factor) as an intermediate: that
+// product overflows for an ordinary operand such as [Meters](1e307), even where
+// the operation's own result is perfectly representable.
+//
+// Each splits its operands with [math.Frexp] into a mantissa in [0.5, 1) and a
+// binary exponent, combines the mantissas — a bounded handful of them, so their
+// product can neither overflow nor underflow — sums the exponents as ints, and
+// reassembles once with [math.Ldexp]. Ldexp is the only step that can leave the
+// float64 range, and it does so exactly when the result does. Mantissas that
+// cancel — the same factor above and below — cancel exactly, so a conversion
+// into a value's own unit, or a value divided by itself, is exact.
+//
+// An infinity or a NaN operand survives Frexp unchanged and propagates as it
+// would have through the plain arithmetic, so Inf × 0 is still a NaN.
+
+// rescale returns m × (from / to): a magnitude carried in a unit of factor from,
+// expressed in a unit of factor to. from == to returns m exactly.
+func rescale(m, from, to float64) float64 {
+	fm, em := math.Frexp(m)
+	ffrom, efrom := math.Frexp(from)
+	fto, eto := math.Frexp(to)
+	return math.Ldexp(fm*(ffrom/fto), em+efrom-eto)
+}
+
+// product returns (a × af) × (b × bf): two magnitudes multiplied in base units.
+func product(a, af, b, bf float64) float64 {
+	fa, ea := math.Frexp(a)
+	faf, eaf := math.Frexp(af)
+	fb, eb := math.Frexp(b)
+	fbf, ebf := math.Frexp(bf)
+	return math.Ldexp(fa*faf*fb*fbf, ea+eaf+eb+ebf)
+}
+
+// quotient returns (a × af) ÷ (b × bf): two magnitudes divided in base units.
+func quotient(a, af, b, bf float64) float64 {
+	fa, ea := math.Frexp(a)
+	faf, eaf := math.Frexp(af)
+	fb, eb := math.Frexp(b)
+	fbf, ebf := math.Frexp(bf)
+	return math.Ldexp((fa*faf)/(fb*fbf), ea+eaf-eb-ebf)
+}
 
 // Scale returns v multiplied by a dimensionless factor. It reports no error, so
 // — unlike [Value.Mul] — it does not guarantee a finite result: an f large
@@ -215,11 +282,18 @@ func (v Value) Neg() Value { return Value{-v.mag, v.unit} }
 
 // Equal reports whether v and o represent the same quantity to within tol of
 // the kind's base unit. Values of different kinds are never equal.
+//
+// Equal has no error to report, so it takes the difference before the base unit:
+// it subtracts in v's unit and rescales only the difference. Two values whose
+// base magnitudes both overflow have an ordinary difference, and a value is
+// equal to itself whatever its magnitude.
 func (v Value) Equal(o Value, tol float64) bool {
 	if v.unit.kind != o.unit.kind {
 		return false
 	}
-	return math.Abs(v.Base()-o.Base()) <= tol
+	vu, ou := v.Unit(), o.Unit()
+	d := v.mag - rescale(o.mag, ou.factor, vu.factor)
+	return math.Abs(rescale(d, vu.factor, 1)) <= tol
 }
 
 // String renders the value as "<magnitude> <symbol>" (just the number for

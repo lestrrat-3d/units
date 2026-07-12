@@ -64,6 +64,13 @@ top of it, and depends only on the standard library.
   magnitude in a divisor is `ErrDivideByZero`, and an overflowing or NaN result
   is `ErrNotFinite`. The operations that have no error to return — `New`,
   `FromBase`, `Scale`, `Neg` — cannot check, and do not.
+- **It is the result that must be finite, never an intermediate.** A base
+  magnitude (`Value.Base()`, the magnitude in the kind's base unit) overflows for
+  ordinary values — `Meters(1e307)` is `1e310 mm` — and no operation forms one.
+  So `Meters(1e307)` converts to metres, divides by itself to `1`, multiplies by
+  `Millimeters(1e-300)` to `1e10 mm²`, and equals itself. `Base()` is an accessor
+  and reports that infinity honestly; `System.In`, which answers in the system's
+  unit for the kind, returns it rather than a finite number in another unit.
 - **The zero `Value` is 0 of `One`**, so a `Value` declared with `var` behaves as
   a plain 0 in every operation.
 - **Extensible.** `Define` registers a new unit against a kind; a symbol may not

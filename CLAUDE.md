@@ -39,6 +39,20 @@ It is a **foundation module**: consumed by `github.com/lestrrat-3d/sketch` and
   operations (`New`, `FromBase`, `Scale`, `Neg`) cannot check, and say so in
   their docs. Likewise a unit's factor: `Define` panics on a zero, negative,
   infinite or NaN factor.
+- **NEVER form a base magnitude as an intermediate.** `mag * unit.factor` — what
+  `Value.Base()` returns — overflows for ordinary values: `Meters(1e307)` is
+  `1e310 mm`, `+Inf`. `ErrNotFinite` is about the **result**, so an operation
+  that routed through `Base()` would refuse a representable result, or (`Equal`,
+  `System.In` — no error channel) return a wrong one. Every operation does its
+  arithmetic through `rescale`/`product`/`quotient` in `value.go`, which work on
+  the `math.Frexp` mantissa and exponent and reassemble once with `math.Ldexp`;
+  a new operation MUST use them. `Base()` stays a public **accessor** — it may
+  honestly report `+Inf` — and the only operation that may read it is `Div`'s
+  zero-divisor guard, since zeroness is what an overflow cannot corrupt.
+- **NEVER hand back a finite number in a unit it is not in.** `System.In` answers
+  in `UnitFor(v.Kind())` — always. A magnitude that unit cannot hold comes back
+  as the infinity it is; `System.Display` returns a value it cannot carry in the
+  presentation unit unchanged, in its own unit.
 - **NEVER accept a unit as a bare string** in the value-building API. Units are
   typed constants. `Lookup` exists for deserialization only.
 - **NEVER return a naked `float64`** for a quantity that has a unit. That is the

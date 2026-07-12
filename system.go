@@ -47,18 +47,27 @@ func (s System) UnitFor(k Kind) Unit {
 	return baseUnitFor(k)
 }
 
-// In returns v's magnitude expressed in the system's default unit for v's kind.
-// The default unit measures v's kind, so the conversion is always possible; a
-// non-finite magnitude is returned as it is.
+// In returns v's magnitude expressed in the system's default unit for v's kind,
+// as [System.UnitFor] reports it. The default unit measures v's kind, so the
+// conversion is never a kind error; the returned number is always in that unit.
+//
+// It has no error to report, so a magnitude that is not finite in that unit — a
+// v built from an infinity, or one whose conversion genuinely overflows — is
+// returned as the infinity or NaN it is, never as a finite number that would be
+// read as a quantity it is not.
 func (s System) In(v Value) float64 {
-	m, err := v.In(s.UnitFor(v.Kind()))
+	u := s.UnitFor(v.Kind())
+	m, err := v.In(u)
 	if err != nil {
-		return v.mag
+		return v.Base() / u.Factor()
 	}
 	return m
 }
 
-// Display returns v converted to the system's default unit for its kind.
+// Display returns v converted to the system's default unit for its kind, as
+// [System.UnitFor] reports it. A v whose magnitude is not finite in that unit
+// cannot be carried in it, so v is returned unchanged — in its own unit, as the
+// quantity it already is.
 func (s System) Display(v Value) Value {
 	c, err := v.Convert(s.UnitFor(v.Kind()))
 	if err != nil {

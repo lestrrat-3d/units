@@ -48,6 +48,18 @@
 // check: hand them an infinity, or scale past the float64 range, and a non-finite
 // Value comes back.
 //
+// The error is about the result, never an intermediate. A base magnitude — a
+// magnitude times its unit's factor, what [Value.Base] returns — overflows for
+// ordinary values: [Meters](1e307) is 1e310 mm, which no float64 holds. No
+// operation forms one, so [Meters](1e307) still converts to metres, still divides
+// by itself to 1, and still equals itself. [Value.Base] is an accessor, not an
+// operation, and reports that infinity honestly.
+//
+// [System.In] presents a magnitude in the system's unit for the value's kind and
+// has no error to report, so a magnitude that unit cannot hold comes back as the
+// infinity it is — never as a finite number that would be read as a quantity it
+// is not.
+//
 // The named kinds are [Dimensionless], [Length], [Area], [Volume], [Angle],
 // [Mass], [Density], [MomentOfInertia] and [SecondMomentOfArea]. Every one of
 // them has a registered base unit. A kind need not be named to be usable:

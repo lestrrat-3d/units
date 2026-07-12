@@ -150,6 +150,45 @@ number. The limitation is stated in each doc comment, and the arithmetic that
 *can* refuse — `Add`, `Sub`, `Mul`, `Div` — does refuse, so a non-finite value has
 to be **constructed** on purpose rather than stumbled into.
 
+### It is the *result* that must be finite — never an intermediate
+
+`ErrNotFinite` fires when the **result** overflows, and only then. It is not a
+licence to fail on an operand.
+
+The trap is the **base magnitude**: `mag × unit.factor`, what `Value.Base()`
+returns. It overflows for perfectly ordinary values. `Meters(1e307)` is a finite
+magnitude in a built-in unit, and its base magnitude is `1e310 mm` — `+Inf`. An
+operation that formed one as an intermediate would inherit that infinity and
+report `ErrNotFinite` for a result that is representable, or — where there is no
+error channel — return a wrong answer:
+
+```go
+units.Meters(1e307).In(units.Meter)                   // 1e307, not an error
+units.Meters(1e307).Div(units.Meters(1e307))          // Scalar(1)
+units.Meters(1e307).Mul(units.Millimeters(1e-300))    // 1e10 mm²
+units.Meters(1e307).Equal(units.Meters(1e307), 1e-9)  // true
+```
+
+So **no operation forms a base magnitude.** Every one routes its arithmetic
+through the three helpers in `value.go` — `rescale`, `product`, `quotient` — which
+split their operands with `math.Frexp`, combine the mantissas (a bounded handful,
+so their product can neither overflow nor underflow), sum the binary exponents as
+`int`s, and reassemble once with `math.Ldexp`. `Ldexp` is the only step that can
+leave the float64 range, and it does so exactly when the result does. Factors that
+cancel — the same factor above and below — cancel *exactly*, so a conversion into
+a value's own unit, and a value divided by itself, are exact. A new operation gets
+this by using the helpers; reaching for `Base()` instead is how the bug comes back.
+
+`Value.Base()` stays as it is: it is an **accessor**, not an operation. A value
+whose base magnitude genuinely overflows reports `+Inf` there, honestly. The one
+operation that may still read it is `Div`'s zero-divisor guard — zeroness is the
+one thing an overflow cannot corrupt.
+
+`Equal` is the sharpest case, because it has no error channel at all:
+`|Inf − Inf|` is `NaN`, and `NaN <= tol` is `false`, so a value would not be equal
+to itself at any tolerance. It subtracts in the left operand's unit and rescales
+only the difference.
+
 Exponents **saturate**, never wrap. `Pow` narrows its multiplier into the `int8`
 range before scaling, so even `Area.Pow(math.MinInt64)` lands on an endpoint of
 the right sign rather than wrapping into a plausible-looking named kind. An
@@ -215,6 +254,15 @@ angle/dimensionless carve-out would then let it be added to an angle. A silent
 cross-kind coercion, with a nil error the whole way, is precisely what this
 library exists to prevent — so `Display` and `In` are kind-preserving by
 construction, not by luck.
+
+`System.In` returns a bare `float64` and has no error to report, so the **unit**
+that number is in is the whole contract: it is always the unit `UnitFor` gives for
+the value's kind. A magnitude that unit cannot hold — `Metric().In(Meters(1e307))`
+is `1e310 mm` — comes back as the **infinity it is**. Returning the value's own
+magnitude instead would be finite, in the wrong unit, and silent: the caller reads
+millimetres and gets metres. `System.Display` has the same problem and the same
+answer: a value it cannot carry in the presentation unit is returned **unchanged**,
+in its own unit, rather than relabelled.
 
 ### Synthetic units for unnamed kinds
 
