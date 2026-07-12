@@ -175,12 +175,32 @@ units.Meters(1e307).Equal(units.Meters(1e307), 1e-9)  // true
 ```
 
 So **no operation forms a base magnitude.** Every one routes its arithmetic
-through the three helpers in `value.go` — `rescale`, `product`, `quotient` — which
-split their operands with `math.Frexp`, combine the mantissas (a bounded handful,
-so their product can neither overflow nor underflow, and every intermediate keeps
-its full 53 bits), sum the binary exponents as `int`s, and put the scale back with
-`math.Ldexp`. A new operation gets this by using the helpers; reaching for `Base()`
-instead is how the bug comes back.
+through the four helpers in `value.go` — `rescale`, `product`, `quotient`, `sum` —
+which split their operands with `math.Frexp`, combine the mantissas (a bounded
+handful, so their product can neither overflow nor underflow, and every intermediate
+keeps its full 53 bits), sum the binary exponents as `int`s, and put the scale back
+with `math.Ldexp`. A new operation gets this by using the helpers; reaching for
+`Base()` instead is how the bug comes back.
+
+**An operation is one helper, never a composition of them.** `Add` and `Sub` are the
+case that makes this a rule rather than a style note. A sum written as *rescale each
+operand into the result's unit, then add* is two operations, and each can be
+faultless on its own while the pair is not: the rescales round to 53 bits, and the
+addition then cancels bits that are already gone. Two operands whose factors are
+600 decades apart —
+
+```go
+tiny := units.Define("tiny", units.Length, 1e-300)  // and huge, 1e300
+a := units.New(-math.MaxFloat64, tiny)
+b := units.New(1.7976931348623157e-292, huge)       // all but −a
+a.Add(b)  // 6.531456099116113e+291 tiny — the true sum, not the 0 two roundings leave
+b.Add(a)  // 6.53145609911611e-309 huge — the same quantity, a subnormal, rounded once
+```
+
+— rescale into two 53-bit numbers that annihilate, and a sum that float64 holds
+without difficulty comes back as zero, with a nil error. So `sum` is the whole
+addition: it decides finiteness and rounding on the **true sum**, from the operands'
+own magnitudes and factors, and rounds once.
 
 **The range is free.** The exponent split is *all* the helpers do: the mantissas
 are combined in the same order, and grouped the same way, as the plain
@@ -224,25 +244,42 @@ units.Scalar(1.25).Div(units.Centimeters(1e307))            // 1.25e-308, not 1.
 units.Meters(5e-324).Mul(units.Grams(-2.5))                 // -1.5e-323, not -1e-323
 ```
 
+`sum` reads the same rule off its own shape rather than off an exponent, because a
+cancellation puts the ends of the range nowhere near the operands: the bits it loses
+are lost in the middle. The addition itself is safe — an IEEE addition of two exact
+terms is correctly rounded by definition, an infinity exactly when the true sum
+overflows and the nearest float64, subnormals included, when it does not — so the
+fast path is kept exactly where the terms **are** exact: where both operands are
+already carried in the result's unit and neither is rescaled. Wherever a rescale
+would round an operand on its way in, that rounding is one the sum has not
+authorised, and the arithmetic is redone in exact rationals instead. `Add` and `Sub`
+are therefore **correctly rounded**, always: the float64 nearest the true `a ± b`, or
+`ErrNotFinite` when no float64 is near enough.
+
 An infinity or a `NaN` operand has no exact rational and keeps the fast path, where
 it propagates as it would through the plain arithmetic — `Inf × 0` is still a `NaN`,
 and still `ErrNotFinite`.
 
 The test suite pins all of this down against a `big.Rat` oracle. Accuracy: every
-conversion, product and quotient — over everyday magnitudes, and over the extremes
-(subnormals, `1e307`, `MaxFloat64`, `Define`d factors of `1e±300`) — must land no
-further from the true result than the plain expression it replaced, and within two
-ulps of it. Two ulps and not half of one because `(a × af) × (b × bf)` rounds three
-times whoever computes it; what is gated is that the helpers round where the plain
-expression rounds, and no more often. A relative tolerance — even `1e-9` — is some
-`10⁷` ulps and would not see a regression of this class.
+conversion, product, quotient and sum — over everyday magnitudes, and over the
+extremes (subnormals, `1e307`, `MaxFloat64`, `Define`d factors of `1e±300`) — must
+land no further from the true result than the plain expression it replaced, and
+within two ulps of it. Two ulps and not half of one because `(a × af) × (b × bf)`
+rounds three times whoever computes it; what is gated is that the helpers round where
+the plain expression rounds, and no more often. A relative tolerance — even `1e-9` —
+is some `10⁷` ulps and would not see a regression of this class. `Add` and `Sub` are
+gated harder still, bit for bit against the correctly rounded true sum, and swept
+over the operand that most nearly **annihilates** the first — its neighbours and its
+half besides — for every pair of units of a kind, so that the whole significand of
+the result is what the cancellation left.
 
 Finiteness the same oracle decides outright, and there is **no ambiguous band** to
-excuse a wrong answer near `MaxFloat64`: the exact rational either exceeds the last
-float64 or it does not. The overflow boundary is swept densely — both signs, the
-last three float64s, the factors either side of 1 that carry them over the end —
-and every point asserts `ErrNotFinite` when the true result overflows, and the
-correctly rounded value when it does not.
+excuse a wrong answer near `MaxFloat64`, or a cancellation too fine to judge: the
+exact rational either exceeds the last float64 or it does not, and it is the true sum
+whether or not the operands were near-equal. The overflow boundary is swept densely —
+both signs, the last three float64s, the factors either side of 1 that carry them
+over the end — and every point asserts `ErrNotFinite` when the true result overflows,
+and the correctly rounded value when it does not.
 
 `Value.Base()` stays as it is: it is an **accessor**, not an operation. A value
 whose base magnitude genuinely overflows reports `+Inf` there, honestly, and one

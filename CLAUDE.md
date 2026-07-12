@@ -46,12 +46,27 @@ It is a **foundation module**: consumed by `github.com/lestrrat-3d/sketch` and
   through `Base()` would refuse a representable result, report a divide-by-zero
   for a nonzero divisor, or (`Equal`, `System.In` — no error channel) return a
   wrong one. Every operation does its arithmetic through
-  `rescale`/`product`/`quotient` in `value.go`, which work on the `math.Frexp`
+  `rescale`/`product`/`quotient`/`sum` in `value.go`, which work on the `math.Frexp`
   mantissa and exponent and reassemble once with `math.Ldexp`; a new operation
   MUST use them, and `Div`'s zero guard reads the divisor's own **magnitude**
   (a unit factor is positive and finite, so `mag == 0` iff the quantity is zero).
   `Base()` stays a public **accessor** — it may honestly report `+Inf` or `0` —
   and no operation reads it.
+- **An operation is ONE helper, never a composition of them.** A step that is sound
+  on its own does not make the composition sound: the rounding *between* the steps
+  has already happened. `Add`/`Sub` are `sum` — the whole addition, decided on the
+  **true sum** — and NEVER a rescale of each operand followed by an addition, which
+  rounds each rescaled operand to 53 bits and so destroys exactly the bits the
+  addition would have cancelled against: `New(-math.MaxFloat64, tiny)` plus
+  `New(1.7976931348623157e-292, huge)` (factors `1e-300` and `1e300`) is
+  `6.531456099116113e+291 tiny`, not the `0` with a nil error that two roundings
+  leave. A cancellation is **not an extreme** — the operands are, the result is not —
+  so the `atTheEnds` exponent guard cannot see it: `sum` keeps the fast path only
+  where both operands are already carried in the result's unit (both terms are then
+  exact, and an IEEE addition of exact terms is correctly rounded), and redoes the
+  arithmetic in exact rationals wherever a rescale would round an operand on the way
+  in. `Add` and `Sub` are correctly rounded, always — the suite asserts it bit for
+  bit, and sweeps each operand against the one that most nearly annihilates it.
 - **The helpers keep the plain expression's rounding — and add none.** The
   `Frexp`/`Ldexp` split buys range, and it MUST NOT be paid for in accuracy: the
   mantissas are combined in the same order, and grouped the same way, as the plain

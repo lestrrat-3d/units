@@ -59,7 +59,10 @@
 //
 // The range is not paid for in accuracy: the arithmetic rounds where the plain
 // expression rounds and never once more, down among the subnormals as anywhere
-// else. [Scalar](1.25) divided by [Centimeters](1e307) is 1.25e-308.
+// else. [Scalar](1.25) divided by [Centimeters](1e307) is 1.25e-308. [Value.Add]
+// and [Value.Sub] round once and no sooner — they are decided on the exact value of
+// the sum, so a difference that all but cancels keeps what the cancellation leaves,
+// however far apart the two units' factors are.
 //
 // [System.In] presents a magnitude in the system's unit for the value's kind and
 // has no error to report, so a magnitude that unit cannot hold comes back as the

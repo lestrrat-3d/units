@@ -1211,11 +1211,7 @@ func TestExtremeMatrix(t *testing.T) {
 	t.Run("Add and Sub", func(t *testing.T) {
 		for _, a := range extremes() {
 			for _, b := range extremes() {
-				sameKind := a.Kind() == b.Kind()
-				carveOut := (a.Kind() == units.Angle && b.Kind() == units.Dimensionless) ||
-					(a.Kind() == units.Dimensionless && b.Kind() == units.Angle)
-
-				if !sameKind && !carveOut {
+				if !sameKindOrCarveOut(a.Kind(), b.Kind()) {
 					_, err := a.Add(b)
 					require.ErrorIs(t, err, units.ErrIncompatible, "%s + %s", a, b)
 					_, err = a.Sub(b)
@@ -1223,35 +1219,17 @@ func TestExtremeMatrix(t *testing.T) {
 					continue
 				}
 
-				// The sum is carried in a's unit — except in the carve-out entered
-				// from the dimensionless side, where it is carried in b's.
-				u := a.Unit()
-				if a.Kind() == units.Dimensionless && b.Kind() == units.Angle {
-					u = b.Unit()
-				}
-				f := ratOf(t, u.Factor())
+				u := combineUnit(a, b)
+				for _, o := range addSubOps() {
+					want := combineRat(t, a, b, o.sign)
 
-				for _, op := range []struct {
-					name string
-					sign int
-					do   func(units.Value, units.Value) (units.Value, error)
-				}{
-					{"add", 1, units.Value.Add},
-					{"sub", -1, units.Value.Sub},
-				} {
-					ob := baseRat(t, b)
-					if op.sign < 0 {
-						ob = new(big.Rat).Neg(ob)
-					}
-					want := new(big.Rat).Quo(new(big.Rat).Add(baseRat(t, a), ob), f)
-
-					r, err := op.do(a, b)
+					r, err := o.do(a, b)
 					requireResult(t, r.Mag(), err, want)
 					if err != nil {
 						require.Equal(t, units.Value{}, r, "no value escapes with the error")
 						continue
 					}
-					require.Equal(t, u, r.Unit(), "%s: %s %s %s", op.name, a, op.name, b)
+					require.Equal(t, u, r.Unit(), "%s %s %s", a, o.op, b)
 					require.Equal(t, u.Kind(), r.Kind())
 				}
 			}
@@ -1516,10 +1494,9 @@ func TestArithmeticIsNoWorseThanNaive(t *testing.T) {
 	// replaced — the one assertion a relative-tolerance oracle cannot make, since
 	// a regression of an ulp is invisible at 1e-9.
 	//
-	// Add and Sub are the exception, and TestAddSubStaysWithinTwoUlp states their
-	// bound instead: combine does not sum in base units — that is the route that
-	// overflows for an ordinary operand — so it can land a couple of ulps from
-	// where the plain base-unit sum lands.
+	// Add and Sub are held to it too, and to more: they are decided on the true sum,
+	// so they are correctly rounded — TestAddSubIsCorrectlyRounded asserts that
+	// outright — and no plain expression can beat a correctly rounded result.
 	t.Run("In", func(t *testing.T) {
 		for _, from := range builtinUnits() {
 			for _, to := range builtinUnits() {
@@ -1585,6 +1562,37 @@ func TestArithmeticIsNoWorseThanNaive(t *testing.T) {
 
 						require.LessOrEqual(t, ulpErr(t, q.Mag(), want), ulpErr(t, naive, want),
 							"%s / %s: %v is further from the true result than the plain %v", a, b, q.Mag(), naive)
+					}
+				}
+			}
+		}
+	})
+
+	t.Run("Add and Sub", func(t *testing.T) {
+		for _, ua := range builtinUnits() {
+			for _, ub := range builtinUnits() {
+				if !sameKindOrCarveOut(ua.Kind(), ub.Kind()) {
+					continue
+				}
+
+				for _, ma := range everydayMags() {
+					for _, mb := range everydayMags() {
+						for _, sb := range signs() {
+							a, b := units.New(ma, ua), units.New(sb*mb, ub)
+
+							for _, o := range addSubOps() {
+								sum, err := o.do(a, b)
+								require.NoError(t, err, "%s %s %s", a, o.op, b)
+
+								want := combineRat(t, a, b, o.sign)
+								u := combineUnit(a, b)
+								naive := (a.Mag()*ua.Factor() + o.sign*b.Mag()*ub.Factor()) / u.Factor()
+
+								require.LessOrEqual(t, ulpErr(t, sum.Mag(), want), naiveUlpErr(t, naive, want),
+									"%s %s %s: %v is further from the true result than the plain %v",
+									a, o.op, b, sum.Mag(), naive)
+							}
+						}
 					}
 				}
 			}
@@ -1762,6 +1770,40 @@ func TestArithmeticAtTheExtremesIsNoWorseThanNaive(t *testing.T) {
 			}
 		}
 	})
+
+	t.Run("Add and Sub", func(t *testing.T) {
+		for _, ua := range extremeUnits() {
+			for _, ub := range extremeUnits() {
+				if !sameKindOrCarveOut(ua.Kind(), ub.Kind()) {
+					continue
+				}
+
+				for _, ma := range extremeMags() {
+					for _, mb := range extremeMags() {
+						for _, sb := range signs() {
+							a, b := units.New(ma, ua), units.New(sb*mb, ub)
+
+							for _, o := range addSubOps() {
+								want := combineRat(t, a, b, o.sign)
+								u := combineUnit(a, b)
+
+								sum, err := o.do(a, b)
+								if overflows(want) {
+									require.ErrorIs(t, err, units.ErrNotFinite,
+										"%s %s %s: the true result %s overflows float64", a, o.op, b, want.FloatString(3))
+									continue
+								}
+								require.NoError(t, err, "the true result %s is representable", want.FloatString(3))
+
+								naive := (a.Mag()*ua.Factor() + o.sign*b.Mag()*ub.Factor()) / u.Factor()
+								requireNoWorseThanNaivef(t, sum.Mag(), naive, want, "%s %s %s", a, o.op, b)
+							}
+						}
+					}
+				}
+			}
+		}
+	})
 }
 
 // boundaryMags are the magnitudes the overflow boundary is swept at: the last
@@ -1927,24 +1969,63 @@ func TestOverflowBoundaryIsDecided(t *testing.T) {
 	})
 }
 
-// addSubUlpBound is the accuracy Add and Sub are held to: the sum lands within
-// two ulps of the true result, measured at the scale of the larger operand.
-//
-// That is the honest bound, not "no worse than the plain base-unit sum". combine
-// rescales each operand into the result's unit rather than adding base
-// magnitudes, because the base-unit route overflows for an ordinary operand such
-// as Meters(1e307) — so on an everyday metric pair it can land a couple of ulps
-// from where the plain sum lands (Centimeters(1).Sub(Millimeters(7)) is
-// 0.30000000000000004 cm). The trade is deliberate; what is gated is that the
-// error stays bounded.
-//
-// The scale is the larger operand and not the result: a difference that cancels
-// has no precision of its own left to be judged against — Millimeters(1) minus
-// Meters(0.001) is zero to float64, while the true difference of those two
-// magnitudes is 2e-17 mm — so an ulp of such a result measures nothing.
-const addSubUlpBound = 2
+// signs is the pair of signs every operand in the sweeps below is taken at: a
+// cancellation, and an overflow, are questions about a sum of two terms of
+// opposite sign, and they must be asked from both sides.
+func signs() []float64 { return []float64{1, -1} }
 
-func TestAddSubStaysWithinTwoUlp(t *testing.T) {
+// addSubOps is Add and Sub, so a sweep states each assertion once and runs it at
+// both operations. sign is what the oracle applies to the right-hand operand.
+func addSubOps() []struct {
+	op   string
+	sign float64
+	do   func(units.Value, units.Value) (units.Value, error)
+} {
+	return []struct {
+		op   string
+		sign float64
+		do   func(units.Value, units.Value) (units.Value, error)
+	}{
+		{"+", 1, units.Value.Add},
+		{"-", -1, units.Value.Sub},
+	}
+}
+
+// sameKindOrCarveOut reports whether Add and Sub accept the pair: the same kind,
+// or the one cross-kind pair they take — an angle and a dimensionless value, in
+// either order.
+func sameKindOrCarveOut(a, b units.Kind) bool {
+	return a == b ||
+		(a == units.Angle && b == units.Dimensionless) ||
+		(a == units.Dimensionless && b == units.Angle)
+}
+
+// combineUnit returns the unit a + b is carried in: a's, except in the
+// angle/dimensionless carve-out entered from the dimensionless side, where it is
+// b's — so the sum is an angle whichever operand the angle was.
+func combineUnit(a, b units.Value) units.Unit {
+	if a.Kind() == units.Dimensionless && b.Kind() == units.Angle {
+		return b.Unit()
+	}
+	return a.Unit()
+}
+
+// combineRat returns the true value of a + sign×b, in the unit the sum is carried
+// in: the oracle for every Add and Sub assertion in the suite.
+func combineRat(t *testing.T, a, b units.Value, sign float64) *big.Rat {
+	t.Helper()
+
+	rb := new(big.Rat).Mul(baseRat(t, b), ratOf(t, sign))
+	return new(big.Rat).Quo(new(big.Rat).Add(baseRat(t, a), rb), ratOf(t, combineUnit(a, b).Factor()))
+}
+
+func TestAddSubIsCorrectlyRounded(t *testing.T) {
+	// Add and Sub are decided on the true sum, so there is no ulp bound to state
+	// here and no scale to state one at: the result is the float64 nearest the
+	// exact value of a + b, bit for bit, or ErrNotFinite when no float64 is near
+	// enough. A rescale of an operand into the result's unit would round before the
+	// addition, and the addition would then round what it was handed — two roundings
+	// where the sum authorises one.
 	for _, ua := range builtinUnits() {
 		for _, ub := range builtinUnits() {
 			if ua.Kind() != ub.Kind() {
@@ -1953,36 +2034,163 @@ func TestAddSubStaysWithinTwoUlp(t *testing.T) {
 
 			for _, ma := range everydayMags() {
 				for _, mb := range everydayMags() {
-					for _, sign := range []float64{1, -1} {
-						a, b := units.New(ma, ua), units.New(mb, ub)
+					for _, sa := range signs() {
+						for _, sb := range signs() {
+							a, b := units.New(sa*ma, ua), units.New(sb*mb, ub)
 
-						sum, err := a.Add(b)
-						op := "+"
-						if sign < 0 {
-							sum, err = a.Sub(b)
-							op = "-"
+							for _, o := range addSubOps() {
+								want := combineRat(t, a, b, o.sign)
+
+								sum, err := o.do(a, b)
+								require.NoError(t, err, "%s %s %s", a, o.op, b)
+								require.Equal(t, ua, sum.Unit(), "the sum is carried in the left operand's unit")
+								require.Equal(t, nearest(want), sum.Mag(),
+									"%s %s %s: the true result is %s", a, o.op, b, want.FloatString(30))
+							}
 						}
-						require.NoError(t, err, "%s %s %s", a, op, b)
-						require.Equal(t, ua, sum.Unit(), "the sum is carried in the left operand's unit")
-
-						// The true result, in the unit the sum is carried in.
-						ra := new(big.Rat).Mul(ratOf(t, ma), ratOf(t, ua.Factor()))
-						rb := new(big.Rat).Mul(ratOf(t, mb), ratOf(t, ub.Factor()))
-						rb.Mul(rb, ratOf(t, sign))
-						want := new(big.Rat).Quo(new(big.Rat).Add(ra, rb), ratOf(t, ua.Factor()))
-
-						// The scale the error is measured at: the larger operand, in that
-						// same unit.
-						sa, _ := new(big.Rat).Quo(new(big.Rat).Abs(ra), ratOf(t, ua.Factor())).Float64()
-						sb, _ := new(big.Rat).Quo(new(big.Rat).Abs(rb), ratOf(t, ua.Factor())).Float64()
-						ulp := ulpAt(math.Max(sa, sb))
-
-						require.LessOrEqual(t, ulpsBetween(t, sum.Mag(), want, ulp), float64(addSubUlpBound),
-							"%s %s %s: %v is more than %d ulp from the true result %s",
-							a, op, b, sum.Mag(), addSubUlpBound, want.FloatString(20))
 					}
 				}
 			}
 		}
 	}
+}
+
+// cancellingMags are the magnitudes the cancellation sweep is run at: the ends of
+// the range, the subnormals, and everyday numbers. Each is paired with the operand
+// that very nearly annihilates it, so the true sum keeps only the bits the two
+// operands do not share.
+func cancellingMags() []float64 {
+	return []float64{
+		math.MaxFloat64,
+		math.Nextafter(math.MaxFloat64, 0),
+		1e308, 1e300, 1e150, 25.4, 1, math.Pi,
+		1e-300,
+		2.2250738585072014e-308, // the smallest normal
+		5e-324,                  // the smallest subnormal
+	}
+}
+
+// annihilating returns the magnitude in unit u whose quantity most nearly negates
+// v's: the float64 nearest to −(v's base magnitude) ÷ u's factor. Adding it to v
+// leaves only what the two cannot cancel — which is the whole of the true sum, and
+// the whole of what an intermediate rounding would destroy.
+//
+// It is computed in exact rationals, not in float64: the very magnitudes that make
+// this sharp are the ones whose base magnitude float64 cannot hold. The second
+// return is false where no float64 negates v in u — where the quantity is past the
+// end of u's range — and there is nothing to sweep.
+func annihilating(t *testing.T, v units.Value, u units.Unit) (float64, bool) {
+	t.Helper()
+
+	m := nearest(new(big.Rat).Quo(new(big.Rat).Neg(baseRat(t, v)), ratOf(t, u.Factor())))
+	if math.IsInf(m, 0) || m == 0 {
+		return 0, false
+	}
+	return m, true
+}
+
+func TestAddSubKeepsCancellation(t *testing.T) {
+	// A sum is not a rescale of each operand followed by an addition. Each rescale
+	// can be correctly rounded on its own and the sum still be wrong: the bits the
+	// addition would have cancelled against are already gone when it runs. What is
+	// asserted here is the true sum — every point decided by an exact rational, at
+	// both ends of the range, in the subnormals, and across the cancellation.
+	t.Run("the reproducer", func(t *testing.T) {
+		// MaxFloat64 in a unit of factor 1e-300, against the magnitude in a unit of
+		// factor 1e300 that all but negates it: two operands whose factors are 600
+		// decades apart, whose true sum float64 holds without difficulty, and which
+		// rescale into two 53-bit numbers that annihilate.
+		a := units.New(-math.MaxFloat64, tinyLength)
+		b := units.New(1.7976931348623157e-292, hugeLength)
+
+		// In a's unit the sum is an ordinary number near the top of the range…
+		sum, err := a.Add(b)
+		require.NoError(t, err, "the true sum is representable, so it is not an overflow")
+		require.Equal(t, 6.531456099116113e+291, sum.Mag(), "and it is not zero")
+
+		// …and in b's — the same quantity, so the same cancellation — a subnormal.
+		sum, err = b.Add(a)
+		require.NoError(t, err, "the true sum is representable in either operand's unit")
+		require.Equal(t, 6.53145609911611e-309, sum.Mag(), "a subnormal sum is the true one, rounded once")
+
+		// Sub is the same sum with the right-hand operand negated, and says the same.
+		sum, err = a.Sub(b.Neg())
+		require.NoError(t, err)
+		require.Equal(t, 6.531456099116113e+291, sum.Mag())
+
+		sum, err = b.Sub(a.Neg())
+		require.NoError(t, err)
+		require.Equal(t, 6.53145609911611e-309, sum.Mag())
+
+		// Both signs: negating both operands negates the sum, and nothing else.
+		sum, err = a.Neg().Add(b.Neg())
+		require.NoError(t, err)
+		require.Equal(t, -6.531456099116113e+291, sum.Mag())
+
+		sum, err = b.Neg().Sub(a)
+		require.NoError(t, err)
+		require.Equal(t, -6.53145609911611e-309, sum.Mag())
+
+		// And where the two do not cancel but reinforce, the true sum is past the
+		// last float64 in a's unit — which is an overflow, and is reported as one.
+		_, err = a.Sub(b)
+		require.ErrorIs(t, err, units.ErrNotFinite, "the true difference is past the last float64")
+	})
+
+	t.Run("the sweep", func(t *testing.T) {
+		// Every same-kind pair of units — the Defined factors of 1e±300 included, so
+		// the two operands' factors can be 600 decades apart — against the operand
+		// that most nearly annihilates the first. Then the neighbours of that
+		// operand, which cancel almost as much and leave a different handful of bits.
+		for _, ua := range extremeUnits() {
+			for _, ub := range extremeUnits() {
+				if !sameKindOrCarveOut(ua.Kind(), ub.Kind()) {
+					continue
+				}
+
+				for _, ma := range cancellingMags() {
+					for _, sa := range signs() {
+						a := units.New(sa*ma, ua)
+
+						mb, ok := annihilating(t, a, ub)
+						if !ok {
+							continue
+						}
+
+						for _, mb := range []float64{
+							mb,
+							math.Nextafter(mb, math.Inf(1)),
+							math.Nextafter(mb, math.Inf(-1)),
+							mb * 0.5, // a half of it: half the significand survives
+						} {
+							if math.IsInf(mb, 0) {
+								continue // the neighbour of the last float64 is not one
+							}
+
+							for _, o := range addSubOps() {
+								// b is the annihilating operand for the operation at hand: Sub
+								// negates its right-hand operand, so it is negated here too.
+								b := units.New(mb/o.sign, ub)
+								want := combineRat(t, a, b, o.sign)
+
+								sum, err := o.do(a, b)
+								if overflows(want) {
+									require.ErrorIs(t, err, units.ErrNotFinite,
+										"%s %s %s: the true result %s is past the last float64",
+										a, o.op, b, want.FloatString(3))
+									require.Equal(t, units.Value{}, sum, "no value escapes with the error")
+									continue
+								}
+								require.NoError(t, err, "%s %s %s: the true result %s is representable",
+									a, o.op, b, want.FloatString(3))
+								require.Equal(t, combineUnit(a, b), sum.Unit())
+								require.Equal(t, nearest(want), sum.Mag(),
+									"%s %s %s: the true result is %s", a, o.op, b, want.FloatString(30))
+							}
+						}
+					}
+				}
+			}
+		}
+	})
 }

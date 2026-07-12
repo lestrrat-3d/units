@@ -29,10 +29,11 @@ var ErrDivideByZero = errors.New("units: division by zero")
 // +Inf — is an ordinary operand, and an operation on it whose result is in range
 // returns that result.
 //
-// And it is the true result that decides, at both ends of the range: an error
-// exactly when the exact value of the operation is past the last float64, and the
-// correctly rounded value — MaxFloat64 itself included — when it is not. Neither
-// end is a matter of which way an intermediate happened to round.
+// And it is the true result that decides, at both ends of the range and across a
+// cancellation: an error exactly when the exact value of the operation is past the
+// last float64, and the correctly rounded value — MaxFloat64 itself included, and
+// the subnormals — when it is not. No end of the range, and no sum whose operands
+// nearly annihilate, is a matter of which way an intermediate happened to round.
 //
 // The operations that cannot report an error — [New], [FromBase], [Value.Scale]
 // and [Value.Neg] — do not check: a caller that hands them an infinity, or that
@@ -148,12 +149,16 @@ func (v Value) Convert(u Unit) (Value, error) {
 // v's unit, or — for that carve-out — in whichever operand's unit is the angle,
 // so the sum is an angle whichever side it appeared on.
 //
-// The sum is always finite: operands large enough to overflow it to an infinity,
-// or to make it a NaN, are [ErrNotFinite].
+// The sum is the true sum, correctly rounded: it is decided on the exact value of
+// v + o, never on a rounding of either operand on its way into the result's unit,
+// so a difference that cancels keeps whatever the cancellation leaves —
+// [ErrNotFinite] exactly when the true sum is past the last float64, and the
+// nearest float64, subnormals included, when it is not.
 func (v Value) Add(o Value) (Value, error) { return v.combine(o, 1) }
 
-// Sub returns v − o, under the same rules as [Value.Add], including the finite
-// result: a difference that overflows or is a NaN is [ErrNotFinite].
+// Sub returns v − o, under the same rules as [Value.Add], including the finite,
+// correctly rounded result: a difference that overflows or is a NaN is
+// [ErrNotFinite], and one that cancels is the true difference.
 func (v Value) Sub(o Value) (Value, error) { return v.combine(o, -1) }
 
 // combine adds sign*o to v.
@@ -173,11 +178,12 @@ func (v Value) combine(o Value, sign float64) (Value, error) {
 		}
 	}
 
-	// Each operand is rescaled into u by the ratio of the factors, never through
-	// its own base magnitude: either magnitude times its own factor can overflow
-	// on its own, even where the sum is representable. The operand already
-	// carried in u rescales by exactly 1.
-	m := rescale(v.mag, vu.factor, u.factor) + sign*rescale(o.mag, ou.factor, u.factor)
+	// The whole sum is formed by one helper, never as a rescale of each operand
+	// followed by an addition: neither operand goes through its own base magnitude
+	// — either magnitude times its own factor can overflow on its own, even where
+	// the sum is representable — and neither rescaled operand is rounded before the
+	// addition, which is what cancellation lives on. See [sum].
+	m := sum(v.mag, vu.factor, sign, o.mag, ou.factor, u.factor)
 	if !isFinite(m) {
 		return Value{}, fmt.Errorf("%w: cannot combine %s with %s", ErrNotFinite, v, o)
 	}
@@ -237,12 +243,18 @@ func (v Value) Div(o Value) (Value, error) {
 // isFinite reports whether x is a real number: neither an infinity nor a NaN.
 func isFinite(x float64) bool { return !math.IsInf(x, 0) && !math.IsNaN(x) }
 
-// The three helpers below are how every operation on a [Value] does its
+// The four helpers below are how every operation on a [Value] does its
 // arithmetic, and no operation may bypass them by forming a base magnitude
 // ([Value.Base], a magnitude times its unit's factor) as an intermediate: that
 // product overflows for an ordinary operand such as [Meters](1e307), and
 // underflows for one such as [Grams](1e-322), even where the operation's own
 // result is perfectly representable.
+//
+// An operation is one helper, never a composition of them. A sum is not a rescale
+// of each operand followed by an addition: each step can be correct on its own
+// while the composition is not, because the rounding between them happens before
+// the addition can use the bits it destroys. [sum] is that whole operation, and it
+// decides finiteness and rounding on the true sum.
 //
 // Each has two paths. The fast one splits its operands with [math.Frexp] into a
 // mantissa in [0.5, 1) and a binary exponent, combines the mantissas — a bounded
@@ -380,14 +392,61 @@ func quotient(a, af, b, bf float64) float64 {
 	return exact(new(big.Rat).Quo(baseRat(a, af), baseRat(b, bf)), math.Signbit(a) != math.Signbit(b))
 }
 
+// sum returns (a × af + sign × b × bf) ÷ to: two magnitudes, each carried in a unit
+// of its own factor, added — sign is +1 or −1 — in the unit of factor to, which is
+// af or bf. It is the whole of an addition, not a step in one, and that is the point.
+//
+// A sum is the one operation the [atTheEnds] rule cannot be applied a step at a time.
+// Rescaling each operand into to and then adding the two results is a *composition*:
+// each rescale can be correctly rounded on its own and the sum still be wrong, because
+// the bits the addition would have cancelled against are gone before it sees them. Two
+// operands whose factors are far apart — a magnitude at the top of the range in a unit
+// of factor 1e-300, and its near-negation in one of factor 1e300 — rescale to two
+// 53-bit numbers that annihilate, and the true difference, which float64 holds without
+// difficulty, is lost entirely. So the true sum is what decides, and it is rounded
+// once.
+//
+// The fast path is therefore kept only where the addition is the sole rounding:
+// where both operands are already carried in to (af == bf, so to is both, and each
+// term is the operand's own magnitude), an IEEE addition of two exact terms is
+// correctly rounded by definition — an infinity exactly when the true sum overflows,
+// and the nearest float64, subnormals included, when it does not. Wherever a rescale
+// is needed the rounding it would do is a rounding the sum has not authorised, so the
+// arithmetic is redone in exact rationals: a float64 magnitude and a float64 factor
+// are exact rationals, and so is their sum, whatever the two units are.
+//
+// An infinity or a NaN operand has no exact rational and keeps the fast path, where it
+// propagates as it would through the plain arithmetic.
+func sum(a, af, sign, b, bf, to float64) float64 {
+	if af == bf || to == 0 || !exactly(a, af, b, bf, to) {
+		return rescale(a, af, to) + sign*rescale(b, bf, to)
+	}
+	t := baseRat(b, bf)
+	if sign < 0 {
+		t.Neg(t)
+	}
+	t.Add(baseRat(a, af), t)
+	t.Quo(t, new(big.Rat).SetFloat64(to))
+
+	// A sum that underflows takes the sign of the true sum; one that is exactly zero
+	// is +0, as x + (−x) is in the plain arithmetic.
+	return exact(t, t.Sign() < 0)
+}
+
 // Scale returns v multiplied by a dimensionless factor. It reports no error, so
 // — unlike [Value.Mul] — it does not guarantee a finite result: an f large
 // enough to overflow the magnitude, an infinite f, or a NaN f yields a
 // non-finite Value. Use Mul with a [Scalar] where the result must be checked.
+//
+// Accuracy is not at stake in it, only finiteness: the magnitude is scaled in v's
+// own unit, so there is one multiplication and one rounding — no unit factor, no
+// rescale, and nothing to cancel — and the result is the correctly rounded one
+// whenever float64 holds it.
 func (v Value) Scale(f float64) Value { return Value{v.mag * f, v.unit} }
 
 // Neg returns −v. It reports no error and cannot make a finite magnitude
-// non-finite; a v that is already non-finite negates to a non-finite Value.
+// non-finite, and negation is exact; a v that is already non-finite negates to a
+// non-finite Value.
 func (v Value) Neg() Value { return Value{-v.mag, v.unit} }
 
 // Equal reports whether v and o represent the same quantity to within tol of
