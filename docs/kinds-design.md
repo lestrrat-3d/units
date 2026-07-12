@@ -206,8 +206,19 @@ number in the wrong unit.
 
 `Equal` is the sharpest case, because it has no error channel at all:
 `|Inf − Inf|` is `NaN`, and `NaN <= tol` is `false`, so a value would not be equal
-to itself at any tolerance. It subtracts in the left operand's unit and rescales
-only the difference.
+to itself at any tolerance. It subtracts in a unit common to both operands and
+rescales only the difference.
+
+That common unit is chosen by a property of the **pair** — the larger of the two
+factors — and never by which operand is the receiver. An equality predicate whose
+answer depends on the order of its operands is broken whichever answer it gives:
+rescaling only the *other* operand rounds one side and not the other, so
+`a.Equal(b, 0)` and `b.Equal(a, 0)` could disagree about two renderings of one
+quantity. Rescaling **both** operands into the same unit makes the swap negate the
+difference and leave its magnitude alone, and equal factors leave nothing to
+choose — both rescales are the identity, and the final rescale is by that same
+factor whichever unit is named. The suite sweeps every built-in pair of a kind, at
+every tolerance including zero, for exactly this.
 
 Exponents **saturate**, never wrap. `Pow` narrows its multiplier into the `int8`
 range before scaling, so even `Area.Pow(math.MinInt64)` lands on an endpoint of

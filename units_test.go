@@ -960,14 +960,24 @@ func ulpErr(t *testing.T, got float64, want *big.Rat) float64 {
 		require.InDelta(t, 0, got, 0, "the true result is zero")
 		return 0
 	}
+	return ulpsBetween(t, got, want, ulpAt(w))
+}
 
-	// want == mantissa × 2**e with the mantissa in [0.5, 1), so the last place of
-	// the 53-bit significand is 2**(e-53).
-	_, e := math.Frexp(w)
+// ulpAt returns the size of the last place of x: x == mantissa × 2**e with the
+// mantissa in [0.5, 1), so the last place of the 53-bit significand is 2**(e-53).
+func ulpAt(x float64) float64 {
+	_, e := math.Frexp(x)
 	ulp := math.Ldexp(1, e-53)
 	if ulp == 0 {
-		ulp = math.SmallestNonzeroFloat64 // a subnormal true result
+		return math.SmallestNonzeroFloat64 // a subnormal
 	}
+	return ulp
+}
+
+// ulpsBetween returns the distance from got to want, measured in units of ulp —
+// the last place of whatever scale the caller judges the error at.
+func ulpsBetween(t *testing.T, got float64, want *big.Rat, ulp float64) float64 {
+	t.Helper()
 
 	diff := new(big.Rat).Abs(new(big.Rat).Sub(ratOf(t, got), want))
 	n, _ := new(big.Rat).Quo(diff, ratOf(t, ulp)).Float64()
@@ -1321,47 +1331,117 @@ func TestConversionIsExact(t *testing.T) {
 	})
 }
 
+// equalTols are the tolerances the symmetry sweep is run at: exact equality, a
+// tolerance below the last place of an everyday base magnitude, and tolerances a
+// caller would actually pass. They are absolute, in the kind's base unit, and
+// fixed here — a tolerance computed from the code under test (a.Base(), say)
+// would grow with whatever that code returned and could swallow the very
+// disagreement it is supposed to catch.
+func equalTols() []float64 { return []float64{0, 1e-12, 1e-9, 1e-6, 1e-3} }
+
+// sameQuantityPairs are pairs that denote one quantity written two ways: the
+// specific reproducers of the asymmetry, alongside the exact ones.
+func sameQuantityPairs() [][2]units.Value {
+	return [][2]units.Value{
+		{units.Millimeters(25.4), units.Inches(1)},
+		{units.GramsPerCubicCentimeter(1000), units.KilogramsPerCubicMeter(1e6)},
+		{units.KilogramsPerCubicMillimeter(1), units.KilogramsPerCubicMeter(1e9)},
+		{units.KilogramsPerCubicMillimeter(1), units.GramsPerCubicCentimeter(1e6)},
+		{units.Inches(1e-6), units.Thous(0.001)}, // both are exactly 2.54e-5 mm
+		{units.Meters(1), units.Millimeters(1000)},
+		{units.Feet(1), units.Inches(12)},
+		{units.SquareMeters(1), units.SquareCentimeters(1e4)},
+		{units.Liters(1), units.CubicCentimeters(1000)},
+		{units.Kilograms(1), units.Grams(1000)},
+		{units.Degrees(180), units.Radians(math.Pi)},
+	}
+}
+
 func TestEqualIsSymmetric(t *testing.T) {
 	// An equality predicate whose answer depends on the order of its operands is
-	// broken whichever answer it gives.
+	// broken whichever answer it gives. The assertion here is symmetry itself —
+	// that the two readings agree — not that either says true: at tol 0 a
+	// conversion that rounds may leave two renderings of one quantity an ulp
+	// apart, and the predicate is entitled to say so, but it must say the same
+	// thing whichever operand it is handed first.
 	require.True(t, units.Millimeters(25.4).Equal(units.Inches(1), 0), "25.4 mm is one inch")
 	require.True(t, units.Inches(1).Equal(units.Millimeters(25.4), 0), "…in either order")
 
-	for _, ua := range builtinUnits() {
-		for _, ub := range builtinUnits() {
-			for _, m := range everydayMags() {
-				a, b := units.New(m, ua), units.New(m, ub)
+	requireSymmetric := func(t *testing.T, a, b units.Value) {
+		t.Helper()
 
-				for _, tol := range []float64{0, 1e-9, 1e9} {
-					require.Equal(t, a.Equal(b, tol), b.Equal(a, tol),
-						"Equal is symmetric: %s, %s at tol %v", a, b, tol)
-				}
-
-				if ua.Kind() != ub.Kind() {
-					continue
-				}
-
-				// The sharp case: c is a's own quantity, carried in another unit, and
-				// both directions agree it is the same quantity. A conversion that is
-				// not exact rounds, so the tolerance is relative to the quantity —
-				// below the last place of its own magnitude, no tolerance is symmetric
-				// and none is meaningful.
-				c, err := a.Convert(ub)
-				require.NoError(t, err)
-				tol := math.Abs(a.Base())*1e-12 + 1e-12
-				require.True(t, a.Equal(c, tol), "%s is %s", a, c)
-				require.True(t, c.Equal(a, tol), "…and %s is %s, whichever side it is read from", c, a)
-			}
+		for _, tol := range equalTols() {
+			require.Equal(t, a.Equal(b, tol), b.Equal(a, tol),
+				"Equal is symmetric: %s, %s at tol %v", a, b, tol)
 		}
 	}
+
+	t.Run("one quantity written two ways", func(t *testing.T) {
+		// The sharp case, and the one the sweep below never used to construct: the
+		// magnitudes differ precisely so that the two values denote the same
+		// quantity. An asymmetric predicate rescales the operand it is handed
+		// second, so it is exactly here that the two readings can round apart.
+		for _, p := range sameQuantityPairs() {
+			requireSymmetric(t, p[0], p[1])
+		}
+	})
+
+	t.Run("every built-in pair of a kind", func(t *testing.T) {
+		for _, ua := range builtinUnits() {
+			for _, ub := range builtinUnits() {
+				for _, m := range everydayMags() {
+					// Two magnitudes that are the same number, and so — across units —
+					// almost never the same quantity.
+					requireSymmetric(t, units.New(m, ua), units.New(m, ub))
+
+					if ua.Kind() != ub.Kind() {
+						continue
+					}
+
+					// And the same quantity in both units: c is a's own quantity carried
+					// in ub. Both readings must agree at every tolerance, tol 0 included.
+					a := units.New(m, ua)
+					c, err := a.Convert(ub)
+					require.NoError(t, err)
+					requireSymmetric(t, a, c)
+
+					// A conversion that rounds moves the quantity by an ulp or so of its
+					// own magnitude; one base unit is far above that for every everyday
+					// value here, and both readings must find them equal there.
+					require.True(t, a.Equal(c, 1), "%s is %s to within a base unit", a, c)
+					require.True(t, c.Equal(a, 1), "…and %s is %s, whichever side it is read from", c, a)
+				}
+			}
+		}
+	})
+
+	t.Run("different kinds are never equal", func(t *testing.T) {
+		for _, ua := range builtinUnits() {
+			for _, ub := range builtinUnits() {
+				if ua.Kind() == ub.Kind() {
+					continue
+				}
+				a, b := units.New(1, ua), units.New(1, ub)
+				for _, tol := range append(equalTols(), 1e9) {
+					require.False(t, a.Equal(b, tol), "%s is not %s at any tolerance", a, b)
+					require.False(t, b.Equal(a, tol), "…nor the other way round")
+				}
+			}
+		}
+	})
 }
 
 func TestArithmeticIsNoWorseThanNaive(t *testing.T) {
 	// The Frexp/Ldexp helpers exist to keep an intermediate in range, not to buy
-	// that range with accuracy. Against an exact-rational oracle, every operation
-	// must land no further from the true result than the plain expression it
+	// that range with accuracy. Against an exact-rational oracle, In, Mul and Div
+	// must land no further from the true result than the plain expression each
 	// replaced — the one assertion a relative-tolerance oracle cannot make, since
 	// a regression of an ulp is invisible at 1e-9.
+	//
+	// Add and Sub are the exception, and TestAddSubStaysWithinTwoUlp states their
+	// bound instead: combine does not sum in base units — that is the route that
+	// overflows for an ordinary operand — so it can land a couple of ulps from
+	// where the plain base-unit sum lands.
 	t.Run("In", func(t *testing.T) {
 		for _, from := range builtinUnits() {
 			for _, to := range builtinUnits() {
@@ -1432,4 +1512,64 @@ func TestArithmeticIsNoWorseThanNaive(t *testing.T) {
 			}
 		}
 	})
+}
+
+// addSubUlpBound is the accuracy Add and Sub are held to: the sum lands within
+// two ulps of the true result, measured at the scale of the larger operand.
+//
+// That is the honest bound, not "no worse than the plain base-unit sum". combine
+// rescales each operand into the result's unit rather than adding base
+// magnitudes, because the base-unit route overflows for an ordinary operand such
+// as Meters(1e307) — so on an everyday metric pair it can land a couple of ulps
+// from where the plain sum lands (Centimeters(1).Sub(Millimeters(7)) is
+// 0.30000000000000004 cm). The trade is deliberate; what is gated is that the
+// error stays bounded.
+//
+// The scale is the larger operand and not the result: a difference that cancels
+// has no precision of its own left to be judged against — Millimeters(1) minus
+// Meters(0.001) is zero to float64, while the true difference of those two
+// magnitudes is 2e-17 mm — so an ulp of such a result measures nothing.
+const addSubUlpBound = 2
+
+func TestAddSubStaysWithinTwoUlp(t *testing.T) {
+	for _, ua := range builtinUnits() {
+		for _, ub := range builtinUnits() {
+			if ua.Kind() != ub.Kind() {
+				continue
+			}
+
+			for _, ma := range everydayMags() {
+				for _, mb := range everydayMags() {
+					for _, sign := range []float64{1, -1} {
+						a, b := units.New(ma, ua), units.New(mb, ub)
+
+						sum, err := a.Add(b)
+						op := "+"
+						if sign < 0 {
+							sum, err = a.Sub(b)
+							op = "-"
+						}
+						require.NoError(t, err, "%s %s %s", a, op, b)
+						require.Equal(t, ua, sum.Unit(), "the sum is carried in the left operand's unit")
+
+						// The true result, in the unit the sum is carried in.
+						ra := new(big.Rat).Mul(ratOf(t, ma), ratOf(t, ua.Factor()))
+						rb := new(big.Rat).Mul(ratOf(t, mb), ratOf(t, ub.Factor()))
+						rb.Mul(rb, ratOf(t, sign))
+						want := new(big.Rat).Quo(new(big.Rat).Add(ra, rb), ratOf(t, ua.Factor()))
+
+						// The scale the error is measured at: the larger operand, in that
+						// same unit.
+						sa, _ := new(big.Rat).Quo(new(big.Rat).Abs(ra), ratOf(t, ua.Factor())).Float64()
+						sb, _ := new(big.Rat).Quo(new(big.Rat).Abs(rb), ratOf(t, ua.Factor())).Float64()
+						ulp := ulpAt(math.Max(sa, sb))
+
+						require.LessOrEqual(t, ulpsBetween(t, sum.Mag(), want, ulp), float64(addSubUlpBound),
+							"%s %s %s: %v is more than %d ulp from the true result %s",
+							a, op, b, sum.Mag(), addSubUlpBound, want.FloatString(20))
+					}
+				}
+			}
+		}
+	}
 }

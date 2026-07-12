@@ -300,16 +300,30 @@ func (v Value) Neg() Value { return Value{-v.mag, v.unit} }
 // the kind's base unit. Values of different kinds are never equal.
 //
 // Equal has no error to report, so it takes the difference before the base unit:
-// it subtracts in v's unit and rescales only the difference. Two values whose
-// base magnitudes both overflow have an ordinary difference, and a value is
-// equal to itself whatever its magnitude.
+// it subtracts in a unit common to both operands and rescales only the
+// difference. Two values whose base magnitudes both overflow have an ordinary
+// difference, and a value is equal to itself whatever its magnitude.
+//
+// The answer does not depend on which operand is the receiver: the common unit
+// is chosen by a property of the pair — the larger of the two factors — so
+// swapping v and o negates the difference and leaves its magnitude alone.
 func (v Value) Equal(o Value, tol float64) bool {
 	if v.unit.kind != o.unit.kind {
 		return false
 	}
 	vu, ou := v.Unit(), o.Unit()
-	d := v.mag - rescale(o.mag, ou.factor, vu.factor)
-	return math.Abs(rescale(d, vu.factor, 1)) <= tol
+
+	// The common unit is chosen by a rule that depends on the pair, not on the
+	// order it is read in: the larger factor. Both operands rescale into it, so
+	// swapping v and o negates the difference and leaves its magnitude alone.
+	// Equal factors leave nothing to choose: both rescales are the identity and
+	// the final rescale is by that same factor, whichever unit is named.
+	cu := vu
+	if ou.factor > vu.factor {
+		cu = ou
+	}
+	d := rescale(v.mag, vu.factor, cu.factor) - rescale(o.mag, ou.factor, cu.factor)
+	return math.Abs(rescale(d, cu.factor, 1)) <= tol
 }
 
 // String renders the value as "<magnitude> <symbol>" (just the number for
