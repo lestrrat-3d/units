@@ -12,6 +12,9 @@ in, err := w.In(units.Inch)   // 3.937...
 fmt.Println(w)                // "100 mm"
 
 _, err = w.Convert(units.Degree)  // error: a length is not an angle
+
+a, err := units.Millimeters(2).Mul(units.Millimeters(3))  // "6 mm^2", an Area
+v, err := a.Mul(units.Millimeters(4))                     // "24 mm^3", a Volume
 ```
 
 ## Why
@@ -34,9 +37,61 @@ top of it, and depends only on the standard library.
 - **Units are typed, never stringly.** You name a unit through a `Unit` constant
   (`Millimeter`, `Inch`, `Degree`), not by passing `"mm"` around. `Lookup` exists
   for deserialization; it is not the normal way to build a value.
-- **Base units are the millimetre (`Length`) and the radian (`Angle`).** Every
-  unit stores its factor to its kind's base.
-- **Extensible.** `Define` registers a new unit against an existing kind.
+- **Kinds are dimensions, not an enumeration.** A `Kind` is a vector of exponents
+  over length, mass and angle, so kinds compose: `Mul` adds them and `Div`
+  subtracts them, and `Area`, `Volume`, `Density` (M·L⁻³), `MomentOfInertia`
+  (M·L²) and `SecondMomentOfArea` (L⁴) fall out for free. A kind nobody named —
+  an inverse length, say — is still a kind: it compares and prints (`L⁻¹`),
+  though no base unit is registered for it.
+- **An angle is its own dimension**, even though a radian is physically a ratio
+  of two lengths, so a bare number can never pass as an angle. The one carve-out
+  is that `Add`/`Sub` accept an angle and a dimensionless value together.
+- **An exponent that overflows says so, and keeps saying so.** Exponents are
+  `int8`; a composition that runs off the end saturates and marks the kind
+  **overflowed** (`Kind.Overflowed()`). The mark is sticky: `Mul`, `Div` and `Pow`
+  propagate it, so an overflowed kind never equals a named kind, prints as
+  `overflowed`, has no base unit, and carries the reserved `[overflow]` symbol.
+  A saturated exponent is a lie about the number; without the mark, dividing an
+  overflowed `L¹²⁷` by `L¹²⁶` would hand back a perfectly plausible `Length`.
+- **Every named kind has a base unit**: the millimetre (`Length`), the square
+  millimetre (`Area`), the cubic millimetre (`Volume`), the kilogram (`Mass`),
+  the kilogram per cubic millimetre (`Density`), the kilogram square millimetre
+  (`MomentOfInertia`), the quartic millimetre (`SecondMomentOfArea`) and the
+  radian (`Angle`). Every unit stores its factor to its kind's base. Symbols are
+  ASCII, with a caret for an exponent: `mm^2`, `in^3`, `kg/m^3`.
+- **A value of an unnamed kind is transient.** It carries a synthetic,
+  unregistered unit whose symbol is bracketed (`[L^-1]`) — `Lookup` will not
+  resolve it, so it must not be persisted. Compose it back into a named kind
+  first. It is still that kind everywhere else: a `System`'s default unit for it
+  measures it, so presenting a value never changes what it measures. A `System`
+  field left unset, or holding a unit of the wrong kind, is ignored in favour of
+  the kind's base unit — the zero `System` presents every kind as itself.
+- **A result is finite, or it is an error.** `Add`, `Sub`, `Mul`, `Div`, `In` and
+  `Convert` never hand back an `+Inf` or a `NaN` with a nil error: a zero divisor
+  is `ErrDivideByZero`, and an overflowing or NaN result is `ErrNotFinite`. The
+  operations that have no error to return — `New`, `FromBase`, `Scale`, `Neg` —
+  cannot check, and do not.
+- **It is the result that must be finite, never an intermediate.** A base
+  magnitude (`Value.Base()`, the magnitude in the kind's base unit) overflows for
+  ordinary values — `Meters(1e307)` is `1e310 mm` — and underflows for others —
+  `Grams(1e-322)` is `1e-325 kg`. No operation forms one. So `Meters(1e307)`
+  converts to metres, divides by itself to `1`, multiplies by `Millimeters(1e-300)`
+  to `1e10 mm²`, and equals itself, and `Grams(1e-322)` is an ordinary divisor
+  rather than a zero one. `Base()` is an accessor and reports that infinity — or
+  that zero — honestly; `System.In`, which answers in the system's unit for the
+  kind, returns the infinity rather than a finite number in another unit.
+- **The range costs no accuracy.** Conversions are exact where the arithmetic is:
+  `25.4 mm` is exactly `1 in`, `1000 g/cm³` exactly `1e6 kg/m³`, a value in its own
+  unit is its own magnitude, and a value divided by itself is exactly `1`. The
+  arithmetic rounds where the plain expression rounds and never once more —
+  subnormal results included, where a second rounding would be worse than the
+  plain expression: `Scalar(1.25).Div(Centimeters(1e307))` is `1.25e-308`.
+- **The zero `Value` is 0 of `One`**, so a `Value` declared with `var` behaves as
+  a plain 0 in every operation.
+- **Extensible.** `Define` registers a new unit against a kind; a symbol may not
+  be redefined, symbols opening with `[` are reserved for the library, and the
+  factor to the kind's base must be positive and finite. `Define`, `Lookup` and
+  `BaseUnit` are safe to call from multiple goroutines.
 
 ## License
 
