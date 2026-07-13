@@ -485,12 +485,15 @@ than a switch, and returns `(Unit, bool)` — an unnamed kind like `L⁻¹` has 
 base unit registered, and fabricating one would be a lie. The `bool` is the
 honest part: the function has an answer it cannot always give.
 
-Unit symbols are ASCII, with a caret for an exponent, and carry **no whitespace**
-and **no rune a text encoder rewrites**: `Define` panics on a symbol holding
-either (§6 — whitespace is the text form's separator, and an encoder replaces
-what it cannot represent with U+FFFD, so such a symbol could be written and never
-read back unchanged). `Kind.String()` — Unicode superscripts, `L⁻¹`, and English
-names for named kinds — is **display text and never a unit symbol**.
+Unit symbols are **printable ASCII except the space** — every byte `!` through
+`~` — with a caret for an exponent: `Define` panics on anything outside that
+grammar (§6 — a non-ASCII symbol is a homoglyph trap, whitespace is the text
+form's separator, and an encoder replaces a control character with U+FFFD, so
+such a symbol could be written and never read back unchanged). A unit whose
+conventional symbol is not ASCII (µm, °, Å) registers under an ASCII spelling
+(`um`, `deg`, `angstrom`), as the built-ins do. `Kind.String()` — Unicode
+superscripts, `L⁻¹`, and English names for named kinds — is **display text and
+never a unit symbol**.
 
 The registry behind `Define`/`Lookup` is guarded by a `sync.RWMutex`: an
 application may register its own units from any goroutine while others resolve
@@ -593,45 +596,59 @@ boundary where the quantity leaves the process.
 
 ### A registered symbol is a readable symbol
 
-A registered symbol must survive the round trip **byte-identically, through this
-package's own parser and through a standard text encoder alike**, and both rules are
-made to hold at the one place a symbol enters the registry: **`Define`**.
+A registered symbol must survive the round trip **exactly as written — through this
+package's own parser, through a standard text encoder, and past a reader's eyes
+alike**, and the rule is made to hold at the one place a symbol enters the registry:
+**`Define`**. The symbol grammar is one rule — **printable ASCII except the space**,
+every byte `!` (0x21) through `~` (0x7E) — and each class outside it has its own
+refusal.
 
-The parser first. The symbol grammar and the text grammar are **one grammar**: the
-form separates the magnitude from the symbol with a space, so a symbol carrying
-whitespace is one `MarshalText` could write and `UnmarshalText` could never read —
+Non-ASCII first, the reader's half. Unicode is full of lookalikes for the alphabet
+symbols are made of — `mm²` beside the built-in `mm^2`, a Cyrillic `мм` beside `mm`,
+a fullwidth `ｍｍ`, a combining mark on an ASCII letter — and two registered symbols
+a document renders identically are an aliasing trap:
+
+```go
+units.Define("mm²", units.Length, 7)  // panics: a lookalike of the built-in "mm^2"
+```
+
+Were it registrable, the text `10 mm²` would parse, with a nil error, to whatever
+kind and factor the lookalike was registered under, while every reader of the
+document takes it for ten square millimetres. So the class is refused whole, which
+keeps a symbol's bytes and its appearance in agreement — and settles the encoders'
+half of the round trip structurally, because outside ASCII lives everything an
+encoder rewrites: pure ASCII is valid UTF-8 (the `encoding.TextMarshaler` contract,
+where `encoding/json` replaces every invalid byte with U+FFFD), never carries
+**U+FFFD** itself (the rune every lossy rewrite lands on — registered, it would be
+the standing target every corrupted document resolves to, as a **different unit of a
+different kind**), nor the noncharacters **U+FFFE**/**U+FFFF**, nor a Unicode space.
+The cost is spelling: a unit whose conventional symbol is not ASCII (µm, °, Å)
+registers under an ASCII spelling (`um`, `deg`, `angstrom`), exactly as the
+built-ins already do.
+
+Whitespace second — the ASCII space, and the C0 whitespace controls (tab, newline,
+vertical tab, form feed, carriage return) — the parser's half. The symbol grammar
+and the text grammar are **one grammar**: the form separates the magnitude from the
+symbol with a space, so a symbol carrying whitespace is one `MarshalText` could
+write and `UnmarshalText` could never read —
 
 ```go
 units.Define("probe space", units.Length, 7)  // panics: the text parser cannot read it back
 ```
 
-— because `"3 probe space"` cuts into the magnitude `3` and *two tokens*, which is not a
-symbol. `Define` panics on any `unicode.IsSpace` rune (a space, a tab, a newline, a
-carriage return, a vertical tab, a form feed, and the Unicode ones — NEL, NBSP, the
-ideographic space) and registers nothing, as it does for a duplicate symbol, a reserved
-`[` prefix, an overflowed kind or an unusable factor. The whole class is refused and not
-the ASCII space alone: whitespace is what separates the two halves of the form, and a
-symbol must be **one token** of it.
+— because `"3 probe space"` cuts into the magnitude `3` and *two tokens*, which is
+not a symbol. Whitespace is what separates the two halves of the form, and a symbol
+must be **one token** of it, so the whole class is refused and not the space alone.
 
-The encoders second, because the text form exists to be carried by them, and they do
-not fail on text they cannot represent — they **rewrite it as U+FFFD and carry on**.
-`Define` therefore panics on:
+Control characters third — the rest of the C0 range, and DEL — the encoders' half
+inside ASCII. An encoder does not fail on text it cannot represent; it **rewrites it
+as U+FFFD and carries on**. XML 1.0 has no representation for a C0 control, so
+`encoding/xml` — which carries a `Value` through this same text form — writes U+FFFD
+in its place (`encoding/json` escapes and restores a control, but a symbol must
+survive every encoder in the loop, not the friendliest).
 
-- a symbol that is **not valid UTF-8**. `encoding.TextMarshaler` is a contract to
-  produce UTF-8 text, and `encoding/json` replaces every invalid byte with U+FFFD, so
-  the bytes written are never the bytes read.
-- a symbol containing **U+FFFD** itself. It is the rune every lossy rewrite lands on:
-  registered, it would be a standing target — any other symbol, corrupted anywhere and
-  normalized by any encoder, would resolve to it, and a quantity would come back from a
-  document as a **different unit of a different kind**. Unregistrable, a rewrite can
-  only produce a symbol `Lookup` refuses (`ErrUnknownUnit`), never a wrong quantity.
-- a symbol containing a **control character** (any `unicode.IsControl` rune) or the
-  noncharacter **U+FFFE** or **U+FFFF**. XML 1.0 has no representation for them, so
-  `encoding/xml` — which carries a `Value` through this same text form — writes U+FFFD
-  in their place (`encoding/json` escapes and restores a control, but a symbol must
-  survive every encoder in the loop, not the friendliest). The control class is
-  rejected whole, as whitespace is, rather than admitting the corners of it today's
-  encoders happen to pass through.
+Each refusal is a panic with nothing registered, as for a duplicate symbol, a
+reserved `[` prefix, an overflowed kind or an unusable factor.
 
 `One`'s **empty** symbol is the one symbol with no separator — a dimensionless value is
 the bare number — and it stays `One`'s: `Define("")` collides with the registered symbol

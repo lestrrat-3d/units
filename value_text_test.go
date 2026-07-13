@@ -609,12 +609,14 @@ func TestDefineRejectsUnreadableSymbol(t *testing.T) {
 }
 
 func TestDefineRejectsEncoderCorruptibleSymbol(t *testing.T) {
-	// encoding.TextMarshaler is a contract to produce UTF-8 text, and the encoders the
-	// text form serves rewrite what they cannot represent as U+FFFD rather than fail:
-	// encoding/json rewrites every invalid UTF-8 byte, and encoding/xml rewrites a
-	// control character and the noncharacters U+FFFE/U+FFFF besides. A symbol any of
-	// them rewrites is one MarshalText could write and no decoder hands back unchanged,
-	// so Define panics and registers nothing — as it does for whitespace.
+	// The encoders the text form serves rewrite what they cannot represent as U+FFFD
+	// rather than fail: encoding/json rewrites every invalid UTF-8 byte, and
+	// encoding/xml rewrites a control character and the noncharacters U+FFFE/U+FFFF
+	// besides. The symbol grammar — printable ASCII except the space — leaves them
+	// nothing to rewrite: everything an encoder normalizes outside ASCII (an invalid
+	// byte, U+FFFD itself, U+FFFE/U+FFFF, the C1 range) is refused as non-ASCII, and
+	// the ASCII controls are refused by name. Define panics on each and registers
+	// nothing, so no symbol a decoder hands back changed is registrable.
 	for _, tc := range []struct{ name, symbol string }{
 		{"a lone 0xff", "probe-invalid-\xff"},
 		{"a lone continuation byte", "probe-inv~\x80"},
@@ -638,6 +640,64 @@ func TestDefineRejectsEncoderCorruptibleSymbol(t *testing.T) {
 			require.False(t, ok, "a rejected symbol must not be registered")
 		})
 	}
+}
+
+func TestDefineRejectsNonASCIISymbol(t *testing.T) {
+	// A symbol is printable ASCII except the space, so a non-ASCII symbol is
+	// unregistrable however plausible it looks — and plausible is the hazard. Unicode
+	// is full of lookalikes for the alphabet real symbols are made of, and a
+	// registered lookalike would make two visually identical documents parse to
+	// different units. A real-world non-ASCII symbol has an ASCII spelling, and that
+	// is the registrable one, exactly as the built-ins already chose: "deg" and not
+	// "°", "mm^2" and not "mm²".
+	for _, tc := range []struct{ name, symbol string }{
+		{"a superscript lookalike of mm^2", "mm²"},
+		{"a micron", "µm"},
+		{"a degree sign", "°"},
+		{"an angstrom sign", "Å"},
+		{"a fullwidth ASCII lookalike", "ｍｍ"},
+		{"a Cyrillic homoglyph of mm", "мм"},
+		{"an emoji", "📏"},
+		{"a combining mark on an ASCII letter", "A\u030am"}, // "Åm" spelled A + COMBINING RING ABOVE
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			require.PanicsWithValue(t,
+				"units: unit symbol must be ASCII: "+strconv.Quote(tc.symbol),
+				func() { units.Define(tc.symbol, units.Length, 7) },
+				"a non-ASCII symbol must not be registrable")
+			_, ok := units.Lookup(tc.symbol)
+			require.False(t, ok, "a rejected symbol must not be registered")
+		})
+	}
+}
+
+func TestDefineClosesHomoglyphAliasing(t *testing.T) {
+	// The built-in square millimetre is "mm^2"; "mm²" — with U+00B2, SUPERSCRIPT TWO —
+	// is a different registry key that renders indistinguishably from it. Were the
+	// lookalike registrable under some other kind and factor, a document saying
+	// "10 mm²" would parse, with a nil error, to that unit, while every reader of the
+	// document takes it for ten square millimetres.
+	lookalike, ok := tryDefine("mm²", units.Length, 7)
+
+	// Against a registry that admitted the lookalike, the aliasing is demonstrable
+	// end to end; with Define refusing the symbol, this block never runs.
+	if ok {
+		text, err := units.New(10, lookalike).MarshalText()
+		require.NoError(t, err)
+		require.Equal(t, "10 mm²", string(text), "renders exactly like ten square millimetres")
+
+		var back units.Value
+		require.NoError(t, back.UnmarshalText(text), "and the parser reads it, nil error")
+		require.Equal(t, lookalike, back.Unit(), "resolving to the lookalike unit")
+		require.NotEqual(t, units.SquareMillimeter, back.Unit(),
+			"not to the built-in the text appears to name")
+		require.NotEqual(t, units.Area, back.Kind(),
+			"a text a reader takes for an area parsed as another kind entirely")
+	}
+
+	require.False(t, ok, "a non-ASCII lookalike of a registered symbol must be unregistrable")
+	_, found := units.Lookup("mm²")
+	require.False(t, found, "a refused symbol registers nothing")
 }
 
 func TestValueTextJSONCannotAliasAcrossKinds(t *testing.T) {
@@ -687,11 +747,13 @@ func TestValueTextJSONCannotAliasAcrossKinds(t *testing.T) {
 
 // hostileSymbolFragments are what a generated symbol is built from: the characters real
 // symbols are made of (letters, digits, carets, slashes, asterisks), the brackets of the
-// reserved namespace, the punctuation an application might reach for, Unicode, every
-// class of whitespace the text grammar could trip over — and the bytes an encoder
-// rewrites rather than carries: invalid UTF-8 sequences (a fragment is a byte string,
-// not a rune, so a symbol can be genuinely malformed), U+FFFD, control characters from
-// NUL through DEL to the C1 range, and the noncharacters U+FFFE and U+FFFF.
+// reserved namespace, the punctuation an application might reach for, every class of
+// whitespace the text grammar could trip over, the Unicode a real-world symbol would
+// reach for (µ, °, ², Å, an ideograph — every one a lookalike the ASCII-only grammar
+// refuses) — and the bytes an encoder rewrites rather than carries: invalid UTF-8
+// sequences (a fragment is a byte string, not a rune, so a symbol can be genuinely
+// malformed), U+FFFD, control characters from NUL through DEL to the C1 range, and the
+// noncharacters U+FFFE and U+FFFF.
 var hostileSymbolFragments = func() []string {
 	fragments := []string{
 		// Invalid UTF-8 by construction: a lone high byte, a bare continuation, a
@@ -716,17 +778,23 @@ var hostileSymbolFragments = func() []string {
 	return fragments
 }()
 
-// unregistrable states the classes Define refuses, and nothing else: whitespace (the
-// text form's separator), the reserved "[" namespace, and what a text encoder rewrites
-// — invalid UTF-8, U+FFFD, a control character, the noncharacters U+FFFE and U+FFFF.
-// The property test asserts that Define's judgment and this predicate agree exactly.
+// unregistrable states the symbol grammar's complement — what Define refuses, and
+// nothing else. A symbol is printable ASCII except the space (every byte '!' through
+// '~'), not opening with the reserved "[": refused are any non-ASCII byte (which also
+// covers invalid UTF-8, U+FFFD, U+FFFE/U+FFFF, Unicode whitespace and the C1 controls),
+// the ASCII space and whitespace controls, the remaining C0 controls and DEL, and the
+// "[" prefix. The property test asserts that Define's judgment and this predicate
+// agree exactly.
 func unregistrable(symbol string) bool {
-	return strings.ContainsFunc(symbol, unicode.IsSpace) ||
-		strings.HasPrefix(symbol, "[") ||
-		!utf8.ValidString(symbol) ||
-		strings.ContainsFunc(symbol, func(r rune) bool {
-			return unicode.IsControl(r) || r == 0xfffd || r == 0xfffe || r == 0xffff
-		})
+	if strings.HasPrefix(symbol, "[") {
+		return true
+	}
+	for i := range len(symbol) {
+		if b := symbol[i]; b < '!' || b > '~' {
+			return true
+		}
+	}
+	return false
 }
 
 // hostileSymbols generates n plausible-but-hostile symbols. It names no expectation:
@@ -791,18 +859,18 @@ func TestValueTextRoundTripOverHostileSymbols(t *testing.T) {
 	// the encoders' reach are made to agree at Define, so the symbols here are the ones a
 	// hand-written table would not have thought of.
 	accepted, rejected := 0, 0
-	for _, symbol := range hostileSymbols(8000, uniqueSymbol(t, "")) {
+	for _, symbol := range hostileSymbols(32000, uniqueSymbol(t, "")) {
 		u, ok := tryDefine(symbol, units.Length, 3)
 		if !ok {
 			rejected++
-			// A refusal registers nothing, and only an unreadable symbol (whitespace), a
-			// reserved one (the "[" namespace) or one a text encoder rewrites (invalid
-			// UTF-8, U+FFFD, a control, U+FFFE/U+FFFF) is refused — the factor and the
-			// kind are fine.
+			// A refusal registers nothing, and only a symbol outside the grammar — one
+			// carrying a non-ASCII byte (a lookalike, or what an encoder rewrites), the
+			// space, a control character, or the reserved "[" prefix — is refused: the
+			// factor and the kind are fine.
 			_, found := units.Lookup(symbol)
 			require.False(t, found, "a rejected symbol %q must not be registered", symbol)
 			require.True(t, unregistrable(symbol),
-				"%q is neither unreadable, nor reserved, nor corruptible by an encoder, so Define must accept it", symbol)
+				"%q is printable ASCII without a space and not reserved, so Define must accept it", symbol)
 			continue
 		}
 

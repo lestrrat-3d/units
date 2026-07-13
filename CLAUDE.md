@@ -162,33 +162,33 @@ It is a **foundation module**: consumed by `github.com/lestrrat-3d/sketch` and
     `MaxFloat64`, both zeros) **and** over 200k random bit patterns. NEVER "improve"
     the formatting to a fixed precision — that is a lost bit, which is a lost
     guarantee.
-  - **A registered symbol is a readable symbol — enforced at `Define`.** A registered
-    symbol must survive the library's parser AND a standard text encoder,
-    **byte-identically**. The symbol grammar and the text grammar are the same grammar:
-    the form separates the magnitude from the symbol with a **space**, so a symbol
-    carrying whitespace could be written and never read (`"3 probe space"` cuts into a
-    magnitude and two tokens). `Define` therefore **panics** on a symbol holding any
-    `unicode.IsSpace` rune — space, tab, newline, CR, VT, FF, NEL, NBSP, the ideographic
-    space — and registers nothing, as it does for a duplicate symbol, a reserved `[`
-    prefix, an overflowed kind or an unusable factor. `One`'s **empty** symbol is the
-    one symbol with no separator, and it stays `One`'s: `Define("")` collides with it.
-    NEVER patch this in `MarshalText` instead — the invariant is that an unparseable
-    symbol is **unregistrable**, which is what makes `Lookup` a sufficient guard.
-  - **A symbol a text encoder rewrites is unregistrable too — same place, same panic.**
-    Encoders do not fail on text they cannot represent; they **rewrite it as U+FFFD**
-    and carry on. So `Define` also panics on a symbol that is **not valid UTF-8**
-    (`encoding.TextMarshaler` is a UTF-8 contract, and `encoding/json` replaces every
-    invalid byte with U+FFFD — the bytes written are never the bytes read), on one
-    containing **U+FFFD** itself (the rune every lossy rewrite lands on: registered, it
-    would be the standing alias target every corrupted document resolves to — a value
-    deserializing as a **different kind**, the exact failure this library exists to
-    prevent), and on one containing a **control character** (`unicode.IsControl`) or
-    the noncharacter **U+FFFE**/**U+FFFF** (`encoding/xml`, which serializes a `Value`
-    through the same text form, writes U+FFFD for them; the control class is rejected
-    whole, like whitespace — not just the C0 range today's encoders demonstrably
-    mangle). `MarshalText` output is therefore always valid UTF-8, and the suite's
-    hostile-symbol property test round-trips every accepted symbol **through
-    `encoding/json`**, not just through MarshalText/UnmarshalText.
+  - **A registered symbol is a readable symbol — enforced at `Define`.** The symbol
+    grammar is ONE rule: **printable ASCII except the space** (every byte `!` through
+    `~`), not opening with `[`. `Define` **panics** on anything else and registers
+    nothing, as it does for a duplicate symbol, an overflowed kind or an unusable
+    factor. A registered symbol must survive the library's parser, a standard text
+    encoder, AND a reader's eyes, **byte-identically**. `One`'s **empty** symbol is
+    the one symbol with no separator, and it stays `One`'s: `Define("")` collides with
+    it. NEVER patch any of this in `MarshalText` instead — the invariant is that an
+    unreadable symbol is **unregistrable**, which is what makes `Lookup` a sufficient
+    guard.
+  - **Why each class is refused.** A **non-ASCII** symbol is a homoglyph trap: `mm²`
+    is a different registry key from the built-in `mm^2` yet renders identically, so a
+    document saying `10 mm²` would parse, nil-error, to whatever unit wore the
+    lookalike (same for Cyrillic `мм`, fullwidth `ｍｍ`, combining marks). Refusing the
+    class whole also keeps everything an encoder rewrites out of the registry: pure
+    ASCII is valid UTF-8 (`encoding.TextMarshaler` is a UTF-8 contract; `encoding/json`
+    replaces invalid bytes with U+FFFD) and can carry neither **U+FFFD** (the standing
+    alias target every corrupted document would resolve to — a value deserializing as
+    a **different kind**) nor **U+FFFE**/**U+FFFF** nor a Unicode space. A real-world
+    non-ASCII symbol (µm, °, Å) registers under an ASCII spelling (`um`, `deg`,
+    `angstrom`), as the built-ins do. **Whitespace** (the space and the C0 whitespace
+    controls) is the text form's separator: `"3 probe space"` cuts into a magnitude
+    and two tokens. A **control character** (the rest of C0, and DEL) is what
+    `encoding/xml` rewrites as U+FFFD rather than fail. `MarshalText` output is
+    therefore always valid UTF-8, and the suite's hostile-symbol property test
+    round-trips every accepted symbol **through `encoding/json`**, not just through
+    MarshalText/UnmarshalText.
   - **NEVER emit a symbol that cannot be read back.** The marshaller's check *is*
     `Lookup` — and `Lookup` is *enough*, because registered means readable (above). A
     value of an **unnamed kind** (synthetic `[L^-1]`) is
@@ -236,12 +236,14 @@ It is a **foundation module**: consumed by `github.com/lestrrat-3d/sketch` and
 - Go style, testing and file-layout rules: `~/.claude/docs/go.md`. Tests use
   `testify/require` (never `assert`), external `units_test` package.
 - Docs state **current state only** — no changelogs, no "was X, now Y".
-- **Unit symbols are ASCII**, with a caret for an exponent: `mm^2`, `in^3`,
-  `kg/m^3`, and **never any whitespace** (`Define` panics on one — it is the text
-  form's separator) **nor anything a text encoder rewrites**: invalid UTF-8,
-  U+FFFD, a control character, U+FFFE, U+FFFF (`Define` panics on those too).
-  `Kind.String()` is the one place Unicode superscripts appear (`L⁻¹`), and it is
-  display text, never a unit symbol or a registry key.
+- **Unit symbols are printable ASCII except the space** — every byte `!` through
+  `~` — with a caret for an exponent: `mm^2`, `in^3`, `kg/m^3`. `Define` panics
+  on anything else: non-ASCII (a lookalike such as `mm²` must never alias the
+  built-in `mm^2`), whitespace (the text form's separator), a control character
+  (a text encoder rewrites one). A real-world non-ASCII symbol (µm, °, Å)
+  registers under an ASCII spelling (`um`, `deg`, `angstrom`), as the built-ins
+  do. `Kind.String()` is the one place Unicode superscripts appear (`L⁻¹`), and
+  it is display text, never a unit symbol or a registry key.
 - **`[…]` is a reserved symbol namespace.** The synthetic unit a value of an
   unnamed kind carries is `Kind.canonicalSymbol()` (`[L^-1]`, `[L^2*M]`, ASCII,
   order L·M·A). `Define` panics on a symbol opening with `[`.

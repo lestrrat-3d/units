@@ -89,8 +89,10 @@
 // cubic millimetre ([Volume]), the kilogram ([Mass]), the kilogram per cubic
 // millimetre ([Density]), the kilogram square millimetre ([MomentOfInertia]),
 // the quartic millimetre ([SecondMomentOfArea]) and the radian ([Angle]); every
-// unit stores its conversion factor to its kind's base. Unit symbols are ASCII
-// and write an exponent with a caret: "mm^2", "in^3", "kg/m^3".
+// unit stores its conversion factor to its kind's base. Unit symbols are
+// printable ASCII without the space and write an exponent with a caret: "mm^2",
+// "in^3", "kg/m^3". A unit whose conventional symbol is not ASCII is registered
+// under an ASCII spelling, as the built-in "deg" is for the degree sign.
 //
 // # Unnamed kinds are transient
 //
@@ -135,8 +137,9 @@
 //
 // # Extending the unit set
 //
-// [Define] registers a new unit against a kind. A symbol may not be redefined,
-// symbols opening with "[" are reserved, and a unit's factor to its base must be
-// positive and finite; each of those is a panic. The registry is guarded, so
-// [Define], [Lookup] and [BaseUnit] may be called from multiple goroutines.
+// [Define] registers a new unit against a kind. A symbol must be printable
+// ASCII without the space and may not be redefined, symbols opening with "["
+// are reserved, and a unit's factor to its base must be positive and finite;
+// each violation is a panic. The registry is guarded, so [Define], [Lookup] and
+// [BaseUnit] may be called from multiple goroutines.
 package units

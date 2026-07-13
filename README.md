@@ -58,7 +58,10 @@ top of it, and depends only on the standard library.
   the kilogram per cubic millimetre (`Density`), the kilogram square millimetre
   (`MomentOfInertia`), the quartic millimetre (`SecondMomentOfArea`) and the
   radian (`Angle`). Every unit stores its factor to its kind's base. Symbols are
-  ASCII, with a caret for an exponent: `mm^2`, `in^3`, `kg/m^3`.
+  printable ASCII without the space, with a caret for an exponent: `mm^2`,
+  `in^3`, `kg/m^3`. A unit whose conventional symbol is not ASCII (µm, °, Å)
+  registers under an ASCII spelling (`um`, `deg`, `angstrom`), as the built-ins
+  do.
 - **A value of an unnamed kind is transient.** It carries a synthetic,
   unregistered unit whose symbol is bracketed (`[L^-1]`) — `Lookup` will not
   resolve it, so it must not be persisted. Compose it back into a named kind
@@ -103,10 +106,11 @@ top of it, and depends only on the standard library.
   ```
 - **The zero `Value` is 0 of `One`**, so a `Value` declared with `var` behaves as
   a plain 0 in every operation.
-- **Extensible.** `Define` registers a new unit against a kind; a symbol may not
-  be redefined, symbols opening with `[` are reserved for the library, and the
-  factor to the kind's base must be positive and finite. `Define`, `Lookup` and
-  `BaseUnit` are safe to call from multiple goroutines.
+- **Extensible.** `Define` registers a new unit against a kind; a symbol must be
+  printable ASCII without the space and may not be redefined, symbols opening
+  with `[` are reserved for the library, and the factor to the kind's base must
+  be positive and finite. `Define`, `Lookup` and `BaseUnit` are safe to call
+  from multiple goroutines.
 
 ## License
 

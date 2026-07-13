@@ -120,14 +120,14 @@ var ErrUnknownUnit = errors.New("units: unknown unit symbol")
 // bit would give that up at the document boundary.
 //
 // And every registered symbol is one this parser — and the encoder around it — can
-// carry back byte-identically. The separator is a space, so [Define] panics on a symbol
-// carrying whitespace; and an encoder rewrites what it cannot represent as U+FFFD
-// rather than fail, so Define also panics on a symbol that is not valid UTF-8, one
-// containing U+FFFD (the rune every such rewrite lands on — registered, it would be the
-// alias every corrupted document resolves to), a control character, or the
-// noncharacters U+FFFE and U+FFFF. A symbol that could be written and not read back is
-// unregistrable — which is why [Lookup] resolving a unit is all [Value.MarshalText]
-// checks.
+// carry back byte-identically: a symbol is printable ASCII except the space. [Define]
+// panics on a non-ASCII symbol (Unicode lookalikes — "mm²" beside the built-in
+// "mm^2" — would let two texts a document renders identically parse to different
+// units, and outside ASCII lives everything an encoder rewrites to U+FFFD), on one
+// carrying whitespace (the form's separator), and on one carrying a control character
+// (which encoding/xml rewrites as U+FFFD rather than fail). A symbol that could be
+// written and not read back unchanged is unregistrable — which is why [Lookup]
+// resolving a unit is all [Value.MarshalText] checks.
 //
 // Three values have no text form, and each is an error rather than a symbol that could
 // never be read back: one of an unnamed kind ([ErrUnnamedKind]), one whose kind has
@@ -211,7 +211,7 @@ func (v Value) Unit() Unit { return v.unit.normalize() }
 func (v Value) Kind() Kind { return v.unit.kind }
 
 // Base returns the magnitude expressed in the kind's base unit (mm for a
-// length, mm² for an area, rad for an angle).
+// length, mm^2 for an area, rad for an angle).
 //
 // It is an accessor, not an operation, and it is the one place a base magnitude
 // is formed: the product of an ordinary magnitude and its unit's factor can
@@ -697,12 +697,13 @@ func (v Value) String() string {
 //
 // It never writes a text [Value.UnmarshalText] cannot read back — nor one a standard
 // text encoder delivers changed — and it needs only the registry to know it: [Define]
-// rejects every symbol the parser cannot read (one carrying whitespace, which is the
-// form's separator) and every symbol an encoder rewrites (invalid UTF-8, U+FFFD, a
-// control character, U+FFFE, U+FFFF), so a registered symbol survives the parser and
-// the encoder alike, byte-identically, and a [Lookup] that resolves the value's unit
-// is the whole guard. Its output is therefore always valid UTF-8, as
-// [encoding.TextMarshaler] requires.
+// admits only printable ASCII without the space, refusing every symbol the parser
+// cannot read (whitespace is the form's separator), every symbol an encoder rewrites
+// (a control character, and everything outside ASCII), and every non-ASCII lookalike
+// of another symbol besides. A registered symbol survives the parser and the encoder
+// alike, byte-identically, and a [Lookup] that resolves the value's unit is the whole
+// guard. Its output is therefore always valid UTF-8, as [encoding.TextMarshaler]
+// requires.
 //
 // It reports an error rather than write a text that cannot be read back:
 //
@@ -724,12 +725,11 @@ func (v Value) MarshalText() ([]byte, error) {
 	}
 
 	// Lookup is sufficient, and no separate check of the symbol's shape is needed:
-	// [Define] admits no symbol UnmarshalText cannot read (see [hasWhitespace]) and none
-	// a text encoder rewrites (see [hasEncoderUnsafeRune]), so the registry holds only
-	// symbols that survive the whole trip — the empty one of [One], whose value is the
-	// bare magnitude, included. The unit must be the registered one and not merely share
-	// its symbol: a synthetic unit of an unnamed kind carries a bracketed symbol, which
-	// is registered by nothing.
+	// [Define] admits no symbol outside the printable-ASCII-except-space grammar (see
+	// [checkSymbol]), so the registry holds only symbols that survive the whole trip —
+	// the empty one of [One], whose value is the bare magnitude, included. The unit
+	// must be the registered one and not merely share its symbol: a synthetic unit of
+	// an unnamed kind carries a bracketed symbol, which is registered by nothing.
 	if r, ok := Lookup(u.symbol); !ok || r != u {
 		return nil, fmt.Errorf("%w: a %s carries the unregistered symbol %q", ErrUnnamedKind, u.kind, u.symbol)
 	}
