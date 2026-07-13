@@ -485,7 +485,13 @@ than a switch, and returns `(Unit, bool)` — an unnamed kind like `L⁻¹` has 
 base unit registered, and fabricating one would be a lie. The `bool` is the
 honest part: the function has an answer it cannot always give.
 
-Unit symbols are ASCII, with a caret for an exponent. `Kind.String()` — Unicode
+Unit symbols are **printable ASCII except the space** — every byte `!` through
+`~` — with a caret for an exponent: `Define` panics on anything outside that
+grammar (§6 — a non-ASCII symbol is a homoglyph trap, whitespace is the text
+form's separator, and an encoder replaces a control character with U+FFFD, so
+such a symbol could be written and never read back unchanged). A unit whose
+conventional symbol is not ASCII (µm, °, Å) registers under an ASCII spelling
+(`um`, `deg`, `angstrom`), as the built-ins do. `Kind.String()` — Unicode
 superscripts, `L⁻¹`, and English names for named kinds — is **display text and
 never a unit symbol**.
 
@@ -557,13 +563,144 @@ actually measures — length, area, volume, mass, density, moment of inertia,
 second moment of area — is named and has a registered base unit, so this bites
 only genuine intermediates such as `L⁻¹`.
 
-## 6. What this breaks
+## 6. The text form of a value
 
-Almost nothing, because of one lucky fact: **`Kind` is never serialized.** JSON
-stores the unit *symbol* (`"mm"`) and re-derives the kind through `Lookup`, so
-changing `Kind`'s underlying type from `int` to a struct changes **no wire
-format** and no persisted document. That is also why only a value of a *named*
-kind is persistable: a synthetic `[L^-1]` symbol has nothing to re-derive from.
+A `Value`'s fields are unexported, so a `Value` with no marshaller encodes to
+`{}` — the magnitude *and* the unit gone, with a **nil error**. A consumer that
+records every quantity in a serializable document would round-trip a recipe with
+all its dimensions deleted and nothing to say so. `Value` therefore implements
+`encoding.TextMarshaler` and `encoding.TextUnmarshaler`, which `encoding/json`
+and every other text-based encoder use automatically:
+
+```go
+type Step struct{ Distance units.Value `json:"distance"` }
+json.Marshal(Step{Distance: units.Millimeters(10)})  // {"distance":"10 mm"}
+```
+
+The form is **`<magnitude> <symbol>`**: the magnitude, one ASCII space, and the
+unit's registered symbol — `10 mm`, `2.5 mm^2`, `7850 kg/m^3`, `90 deg`. The
+symbol is the vocabulary the registry already has, so nothing new is invented at
+the document boundary. `One`'s symbol is **empty**, so a dimensionless value is
+the **bare number** (`1.5`, `0`) — and that is the only text with no symbol: a
+trailing space, a doubled space and a token after the symbol are each malformed,
+so a bare number can never be a text whose unit went missing.
+
+**The round trip is exact — bit for bit, not "close".** The magnitude is written
+with `strconv.FormatFloat(m, 'g', -1, 64)`, the shortest text that reads back as
+the *same* float64, and read with `strconv.ParseFloat`; the symbol is resolved
+with `Lookup`, which returns the very unit that wrote it. `Unmarshal(Marshal(v))`
+is `v`: the same unit, and the same `math.Float64bits`, subnormals and
+`MaxFloat64` included. It cannot be otherwise. This library holds that `25.4 mm`
+is *exactly* `1 in`; a text form that lost a bit would give that up at the one
+boundary where the quantity leaves the process.
+
+### A registered symbol is a readable symbol
+
+A registered symbol must survive the round trip **exactly as written — through this
+package's own parser, through a standard text encoder, and past a reader's eyes
+alike**, and the rule is made to hold at the one place a symbol enters the registry:
+**`Define`**. The symbol grammar is one rule — **printable ASCII except the space**,
+every byte `!` (0x21) through `~` (0x7E) — and each class outside it has its own
+refusal.
+
+Non-ASCII first, the reader's half. Unicode is full of lookalikes for the alphabet
+symbols are made of — `mm²` beside the built-in `mm^2`, a Cyrillic `мм` beside `mm`,
+a fullwidth `ｍｍ`, a combining mark on an ASCII letter — and two registered symbols
+a document renders identically are an aliasing trap:
+
+```go
+units.Define("mm²", units.Length, 7)  // panics: a lookalike of the built-in "mm^2"
+```
+
+Were it registrable, the text `10 mm²` would parse, with a nil error, to whatever
+kind and factor the lookalike was registered under, while every reader of the
+document takes it for ten square millimetres. So the class is refused whole, which
+keeps a symbol's bytes and its appearance in agreement — and settles the encoders'
+half of the round trip structurally, because outside ASCII lives everything an
+encoder rewrites: pure ASCII is valid UTF-8 (the `encoding.TextMarshaler` contract,
+where `encoding/json` replaces every invalid byte with U+FFFD), never carries
+**U+FFFD** itself (the rune every lossy rewrite lands on — registered, it would be
+the standing target every corrupted document resolves to, as a **different unit of a
+different kind**), nor the noncharacters **U+FFFE**/**U+FFFF**, nor a Unicode space.
+The cost is spelling: a unit whose conventional symbol is not ASCII (µm, °, Å)
+registers under an ASCII spelling (`um`, `deg`, `angstrom`), exactly as the
+built-ins already do.
+
+Whitespace second — the ASCII space, and the C0 whitespace controls (tab, newline,
+vertical tab, form feed, carriage return) — the parser's half. The symbol grammar
+and the text grammar are **one grammar**: the form separates the magnitude from the
+symbol with a space, so a symbol carrying whitespace is one `MarshalText` could
+write and `UnmarshalText` could never read —
+
+```go
+units.Define("probe space", units.Length, 7)  // panics: the text parser cannot read it back
+```
+
+— because `"3 probe space"` cuts into the magnitude `3` and *two tokens*, which is
+not a symbol. Whitespace is what separates the two halves of the form, and a symbol
+must be **one token** of it, so the whole class is refused and not the space alone.
+
+Control characters third — the rest of the C0 range, and DEL — the encoders' half
+inside ASCII. An encoder does not fail on text it cannot represent; it **rewrites it
+as U+FFFD and carries on**. XML 1.0 has no representation for a C0 control, so
+`encoding/xml` — which carries a `Value` through this same text form — writes U+FFFD
+in its place (`encoding/json` escapes and restores a control, but a symbol must
+survive every encoder in the loop, not the friendliest).
+
+Each refusal is a panic with nothing registered, as for a duplicate symbol, a
+reserved `[` prefix, an overflowed kind or an unusable factor.
+
+`One`'s **empty** symbol is the one symbol with no separator — a dimensionless value is
+the bare number — and it stays `One`'s: `Define("")` collides with the registered symbol
+and panics like any other duplicate.
+
+The invariant is enforced at **registration**, not at marshalling, and that is what makes
+the marshaller's guard sound: a symbol the parser cannot read, or an encoder delivers
+changed, is *unregistrable*, so a `Lookup` that resolves a value's unit proves the round
+trip works. Guarding in `MarshalText` instead would leave the registry holding a symbol
+no document could carry.
+
+**A symbol this package emits is a symbol it can read — the check is `Lookup`
+itself.** Three values have no text form, and each is an **error** rather than a
+symbol nothing can resolve:
+
+| The value | The error | Why |
+|---|---|---|
+| an **unnamed** kind (`[L^-1]`) | `ErrUnnamedKind` | the synthetic symbol is unregistered; the value is a transient intermediate. Compose it back into a named kind. |
+| an **overflowed** kind (`[overflow]`) | `ErrOverflowedKind` | its exponents are clamped stand-ins; a programming error must not be laundered into a document. |
+| a **non-finite** magnitude | `ErrNotFinite` | `New`/`FromBase`/`Scale`/`Neg` can build one, and it is not a quantity: a persisted `+Inf mm` read back is a length that is not a length. |
+
+Reading is as strict:
+
+- An unregistered symbol is `ErrUnknownUnit`. It is **never** guessed at, never
+  resolved to the kind's base unit, and never quietly made dimensionless — a
+  magnitude whose unit is unknown is not a quantity either.
+- Text that is not `<magnitude> <symbol>` is `ErrMalformedText`: an empty text, a
+  magnitude `ParseFloat` rejects, an empty symbol after the space, a further token.
+- A literal `+Inf`/`NaN` — which `ParseFloat` accepts — and a literal past the last
+  float64 (`1e999`) are `ErrNotFinite`. A literal *below* the smallest subnormal
+  (`1e-999`) is the nearest float64, `+0`: the same rounding the arithmetic makes at
+  that end of the range, and the whole of what a float64 holds of such a number.
+  `MarshalText` never writes one.
+
+**The negative-zero rule holds across the boundary.** A `Value` carries no `-0`,
+so a zero marshals as `"0"` and never as `"-0 mm"`; and any zero in a document,
+a literal `-0` included, reads back as `+0` — `New` canonicalises it, as it does
+every zero from outside.
+
+`UnmarshalText` is the one pointer method on `Value`; `encoding.TextUnmarshaler`
+requires it. It **assigns** the whole value rather than mutating a field, so the
+immutability rule is untouched: a `Value` that is read into is replaced, not
+edited.
+
+## 7. What this breaks
+
+Almost nothing, because of one lucky fact: **`Kind` is never serialized.** The
+text form stores the unit *symbol* (`"mm"`) and re-derives the kind through
+`Lookup`, so changing `Kind`'s underlying type from `int` to a struct changes
+**no wire format** and no persisted document. That is also why only a value of a
+*named* kind is persistable: a synthetic `[L^-1]` symbol has nothing to re-derive
+from.
 
 The compile-time breakage is small and mechanical:
 
@@ -577,10 +714,11 @@ The compile-time breakage is small and mechanical:
 `sketch` is pre-1.0 with no tags, and its only consumer is `decad`, which has no
 code yet. This is the cheapest this migration will ever be.
 
-## 7. Non-goals
+## 8. Non-goals
 
 Time, current, temperature and the rest of SI — this is a geometry library.
 Unit *parsing* from arbitrary strings (`Lookup` by symbol is for deserialization,
-not a expression parser; `sketch/param` owns expressions). Automatic unit
-*selection* for display (that is `System`'s job). Compound symbol synthesis for
-unnamed kinds beyond a readable `L²·M` form.
+not a expression parser; `sketch/param` owns expressions; `UnmarshalText` reads the
+one text form this library writes, and nothing else). Automatic unit *selection*
+for display (that is `System`'s job). Compound symbol synthesis for unnamed kinds
+beyond a readable `L²·M` form.

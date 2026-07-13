@@ -143,7 +143,69 @@ It is a **foundation module**: consumed by `github.com/lestrrat-3d/sketch` and
   exactness claim about a float64 with `==` or `require.Equal`** — it cannot see this.
 - **A `Value` is immutable.** Operations return a new `Value`. The zero `Value`
   is 0 of `One`: the zero `Unit` is read as `One`, so a `var`-declared `Value`
-  behaves as a plain 0 in every operation.
+  behaves as a plain 0 in every operation. `UnmarshalText` is the one pointer
+  method — `encoding.TextUnmarshaler` requires it — and it **assigns** the whole
+  value (`*v = New(...)`) rather than mutating a field.
+- **The text form carries the unit, and round-trips bit for bit.**
+  `Value.MarshalText`/`UnmarshalText` are `encoding.TextMarshaler`/
+  `TextUnmarshaler`, so `encoding/json` uses them: `"<magnitude> <symbol>"` —
+  `"10 mm"`, `"7850 kg/m^3"` — and the bare number for a dimensionless value, whose
+  unit `One` has an **empty symbol**. Without them a `Value`'s unexported fields
+  encode to `{}` **with a nil error**: the quantity deleted, silently, in a document
+  that is the whole reason this library exists.
+  - **The round trip is exact, not close.** The magnitude is
+    `strconv.FormatFloat(m, 'g', -1, 64)` — the shortest text that reads back as the
+    *same* float64 — and `strconv.ParseFloat` reads it; the symbol goes through
+    `Lookup`, which hands back the very unit that wrote it. `25.4 mm` is exactly
+    `1 in` on both sides of a document, and the suite asserts the round trip on
+    `math.Float64bits` over every built-in unit × a magnitude sweep (subnormals,
+    `MaxFloat64`, both zeros) **and** over 200k random bit patterns. NEVER "improve"
+    the formatting to a fixed precision — that is a lost bit, which is a lost
+    guarantee.
+  - **A registered symbol is a readable symbol — enforced at `Define`.** The symbol
+    grammar is ONE rule: **printable ASCII except the space** (every byte `!` through
+    `~`), not opening with `[`. `Define` **panics** on anything else and registers
+    nothing, as it does for a duplicate symbol, an overflowed kind or an unusable
+    factor. A registered symbol must survive the library's parser, a standard text
+    encoder, AND a reader's eyes, **byte-identically**. `One`'s **empty** symbol is
+    the one symbol with no separator, and it stays `One`'s: `Define("")` collides with
+    it. NEVER patch any of this in `MarshalText` instead — the invariant is that an
+    unreadable symbol is **unregistrable**, which is what makes `Lookup` a sufficient
+    guard.
+  - **Why each class is refused.** A **non-ASCII** symbol is a homoglyph trap: `mm²`
+    is a different registry key from the built-in `mm^2` yet renders identically, so a
+    document saying `10 mm²` would parse, nil-error, to whatever unit wore the
+    lookalike (same for Cyrillic `мм`, fullwidth `ｍｍ`, combining marks). Refusing the
+    class whole also keeps everything an encoder rewrites out of the registry: pure
+    ASCII is valid UTF-8 (`encoding.TextMarshaler` is a UTF-8 contract; `encoding/json`
+    replaces invalid bytes with U+FFFD) and can carry neither **U+FFFD** (the standing
+    alias target every corrupted document would resolve to — a value deserializing as
+    a **different kind**) nor **U+FFFE**/**U+FFFF** nor a Unicode space. A real-world
+    non-ASCII symbol (µm, °, Å) registers under an ASCII spelling (`um`, `deg`,
+    `angstrom`), as the built-ins do. **Whitespace** (the space and the C0 whitespace
+    controls) is the text form's separator: `"3 probe space"` cuts into a magnitude
+    and two tokens. A **control character** (the rest of C0, and DEL) is what
+    `encoding/xml` rewrites as U+FFFD rather than fail. `MarshalText` output is
+    therefore always valid UTF-8, and the suite's hostile-symbol property test
+    round-trips every accepted symbol **through `encoding/json`**, not just through
+    MarshalText/UnmarshalText.
+  - **NEVER emit a symbol that cannot be read back.** The marshaller's check *is*
+    `Lookup` — and `Lookup` is *enough*, because registered means readable (above). A
+    value of an **unnamed kind** (synthetic `[L^-1]`) is
+    `ErrUnnamedKind`, and one of an **overflowed kind** (`[overflow]`) is
+    `ErrOverflowedKind` — the "must not be persisted" rule, enforced at the one place
+    it would have been broken. A **non-finite** magnitude — `New` and friends can
+    build one — is `ErrNotFinite`: a persisted `+Inf mm` read back is a length that
+    is not a length.
+  - **NEVER guess a unit.** An unregistered symbol is `ErrUnknownUnit`; there is no
+    fallback to a base unit and no silent `One`. Malformed text (`ErrMalformedText`)
+    is anything that is not `<magnitude> <symbol>` — a trailing or doubled space, an
+    extra token, a magnitude `ParseFloat` rejects — so the bare-number dimensionless
+    form is unambiguous. A literal `+Inf`/`NaN`, or one past the last float64
+    (`1e999`), is `ErrNotFinite`; one below the smallest subnormal (`1e-999`) is the
+    nearest float64, `+0`, the same rounding the arithmetic makes there.
+  - A marshalled zero is `"0"`, and any zero in a document — `-0` included — reads
+    back as `+0`, bit for bit. The negative-zero rule holds across the boundary.
 - **NEVER persist a value of an unnamed kind.** It carries a synthetic,
   unregistered unit (`[L^-1]`) that `Lookup` cannot resolve; it is a transient
   intermediate. Every named kind has a registered base unit — convert first.
@@ -165,7 +227,7 @@ It is a **foundation module**: consumed by `github.com/lestrrat-3d/sketch` and
 |---|---|
 | `kind.go` | `Kind` — dimension exponents, the named kinds, `Mul`/`Div`/`Pow`, `Overflowed`, `String`. |
 | `unit.go` | `Unit`, the built-in unit set, `BaseUnit`, `Define`, `Lookup`, the mutex-guarded registry. |
-| `value.go` | `Value` — magnitude + unit, conversion, arithmetic, formatting. |
+| `value.go` | `Value` — magnitude + unit, conversion, arithmetic, formatting, the text form (`MarshalText`/`UnmarshalText`). |
 | `system.go` | `System` — the current default units, for presenting base-unit quantities. |
 | `doc.go` | Package doc: scope + the no-naked-float rule. |
 
@@ -174,9 +236,14 @@ It is a **foundation module**: consumed by `github.com/lestrrat-3d/sketch` and
 - Go style, testing and file-layout rules: `~/.claude/docs/go.md`. Tests use
   `testify/require` (never `assert`), external `units_test` package.
 - Docs state **current state only** — no changelogs, no "was X, now Y".
-- **Unit symbols are ASCII**, with a caret for an exponent: `mm^2`, `in^3`,
-  `kg/m^3`. `Kind.String()` is the one place Unicode superscripts appear (`L⁻¹`),
-  and it is display text, never a unit symbol or a registry key.
+- **Unit symbols are printable ASCII except the space** — every byte `!` through
+  `~` — with a caret for an exponent: `mm^2`, `in^3`, `kg/m^3`. `Define` panics
+  on anything else: non-ASCII (a lookalike such as `mm²` must never alias the
+  built-in `mm^2`), whitespace (the text form's separator), a control character
+  (a text encoder rewrites one). A real-world non-ASCII symbol (µm, °, Å)
+  registers under an ASCII spelling (`um`, `deg`, `angstrom`), as the built-ins
+  do. `Kind.String()` is the one place Unicode superscripts appear (`L⁻¹`), and
+  it is display text, never a unit symbol or a registry key.
 - **`[…]` is a reserved symbol namespace.** The synthetic unit a value of an
   unnamed kind carries is `Kind.canonicalSymbol()` (`[L^-1]`, `[L^2*M]`, ASCII,
   order L·M·A). `Define` panics on a symbol opening with `[`.

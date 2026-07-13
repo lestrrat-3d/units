@@ -58,7 +58,10 @@ top of it, and depends only on the standard library.
   the kilogram per cubic millimetre (`Density`), the kilogram square millimetre
   (`MomentOfInertia`), the quartic millimetre (`SecondMomentOfArea`) and the
   radian (`Angle`). Every unit stores its factor to its kind's base. Symbols are
-  ASCII, with a caret for an exponent: `mm^2`, `in^3`, `kg/m^3`.
+  printable ASCII without the space, with a caret for an exponent: `mm^2`,
+  `in^3`, `kg/m^3`. A unit whose conventional symbol is not ASCII (µm, °, Å)
+  registers under an ASCII spelling (`um`, `deg`, `angstrom`), as the built-ins
+  do.
 - **A value of an unnamed kind is transient.** It carries a synthetic,
   unregistered unit whose symbol is bracketed (`[L^-1]`) — `Lookup` will not
   resolve it, so it must not be persisted. Compose it back into a named kind
@@ -86,12 +89,28 @@ top of it, and depends only on the standard library.
   arithmetic rounds where the plain expression rounds and never once more —
   subnormal results included, where a second rounding would be worse than the
   plain expression: `Scalar(1.25).Div(Centimeters(1e307))` is `1.25e-308`.
+- **A quantity serializes with its unit.** `Value` implements
+  `encoding.TextMarshaler`/`TextUnmarshaler`, so `encoding/json` — and any other
+  text-based encoder — writes it as `"<magnitude> <symbol>"`: `"10 mm"`,
+  `"7850 kg/m^3"`, `"90 deg"`. A dimensionless value is the bare number (`"1.5"`),
+  since `One`'s symbol is empty. The round trip is **exact** — the same unit, and
+  the same magnitude bit for bit — and the symbol is resolved through `Lookup`: an
+  unregistered symbol is an error, never a guess and never a silently dimensionless
+  value. What cannot be read back is not written: a value of an unnamed kind, of an
+  overflowed kind, or with a non-finite magnitude has **no text form** and is an
+  error rather than `{}` with a nil error.
+
+  ```go
+  type Step struct{ Distance units.Value `json:"distance"` }
+  b, err := json.Marshal(Step{Distance: units.Millimeters(10)})  // {"distance":"10 mm"}
+  ```
 - **The zero `Value` is 0 of `One`**, so a `Value` declared with `var` behaves as
   a plain 0 in every operation.
-- **Extensible.** `Define` registers a new unit against a kind; a symbol may not
-  be redefined, symbols opening with `[` are reserved for the library, and the
-  factor to the kind's base must be positive and finite. `Define`, `Lookup` and
-  `BaseUnit` are safe to call from multiple goroutines.
+- **Extensible.** `Define` registers a new unit against a kind; a symbol must be
+  printable ASCII without the space and may not be redefined, symbols opening
+  with `[` are reserved for the library, and the factor to the kind's base must
+  be positive and finite. `Define`, `Lookup` and `BaseUnit` are safe to call
+  from multiple goroutines.
 
 ## License
 
