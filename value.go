@@ -683,11 +683,14 @@ func (v Value) Equal(o Value, tol float64) bool {
 // dimensionless values). A zero renders as "0": a Value carries no negative zero,
 // so there is no "-0 mm" to print.
 func (v Value) String() string {
-	n := strconv.FormatFloat(v.mag, 'g', -1, 64)
+	var buf [64]byte
+	n := strconv.AppendFloat(buf[:0], v.mag, 'g', -1, 64)
 	if v.unit.kind == Dimensionless {
-		return n
+		return string(n)
 	}
-	return n + " " + v.Unit().symbol
+	n = append(n, ' ')
+	n = append(n, v.Unit().symbol...)
+	return string(n)
 }
 
 // MarshalText implements [encoding.TextMarshaler], rendering the value as
