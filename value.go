@@ -555,6 +555,9 @@ func sum(a, af, sign, b, bf, to float64) float64 {
 	if af == bf || to == 0 || !exactly(a, af, b, bf, to) {
 		return canonicalZero(rescale(a, af, to) + sign*rescale(b, bf, to))
 	}
+	if result, ok := exactSum(a, af, sign, b, bf, to); ok {
+		return result
+	}
 	t := baseRat(b, bf)
 	if sign < 0 {
 		t.Neg(t)
@@ -669,6 +672,12 @@ func (v Value) Equal(o Value, tol float64) bool {
 	// is within a NaN or a negative infinity.
 	if !exactly(tol) {
 		return math.IsInf(tol, 1)
+	}
+	if tol < 0 {
+		return false
+	}
+	if equal, ok := exactEqual(v.mag, vu.factor, o.mag, ou.factor, tol); ok {
+		return equal
 	}
 
 	// A float64 magnitude and a float64 factor are exact rationals, so the true
