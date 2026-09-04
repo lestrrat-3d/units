@@ -37,7 +37,7 @@ func TestValueStringOutput(t *testing.T) {
 
 var valueStringSink string
 
-func BenchmarkValueString(b *testing.B) {
+func BenchmarkLegacyValueString(b *testing.B) {
 	tests := []struct {
 		name  string
 		value units.Value
