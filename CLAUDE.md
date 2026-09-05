@@ -6,13 +6,15 @@ Update when a design variable gets resolved.
 ## What this is
 
 A small, self-contained **units-of-measure** library in Go. A `Unit` is a symbol
-+ `Kind` + conversion factor; a `Value` is a magnitude + its `Unit`. A `Kind` is
-a vector of dimension exponents (length, mass, angle), so kinds compose:
-`Length.Mul(Length) == Area`, and `Value.Mul`/`Value.Div` derive the result kind
-instead of enumerating it. Design contract: `docs/kinds-design.md`.
++ `Kind` + conversion factor (+ an offset, for the two affine units); a `Value`
+is a magnitude + its `Unit`. A `Kind` is a vector of dimension exponents (length,
+mass, angle, time, temperature), so kinds compose: `Length.Mul(Length) == Area`,
+and `Value.Mul`/`Value.Div` derive the result kind instead of enumerating it.
+Design contract: `docs/kinds-design.md`.
 
-It is a **foundation module**: consumed by `github.com/lestrrat-3d/sketch` and
-`github.com/lestrrat-3d/decad`. It knows about neither.
+It is a **foundation module**: consumed by `github.com/lestrrat-3d/sketch`,
+`github.com/lestrrat-3d/decad` and `github.com/lestrrat-3d/osafune`. It knows
+about none of them.
 
 ## Hard rules
 
@@ -22,6 +24,18 @@ It is a **foundation module**: consumed by `github.com/lestrrat-3d/sketch` and
 - **NEVER know about a consumer.** No sketch, no CAD, no document state, no
   geometry. Quantities and conversions only — if it is not a quantity or a
   conversion, it does not belong here.
+- **An affine unit gives up arithmetic, and that is the whole of the feature.**
+  `Celsius` and `Fahrenheit` carry an `offset` as well as a `factor`, so
+  `base == mag*factor + offset`. They convert, compare, print and persist; `Add`,
+  `Sub`, `Mul` and `Div` return `ErrAffineUnit`, because `20 °C × 2` is not
+  `40 °C` and two absolute temperatures do not add. NEVER "fix" this by picking
+  one of the plausible answers — every one of them is wrong invisibly, which is
+  the failure this library exists to prevent. `Scale`/`Neg` have no error channel
+  and document that they act on the magnitude, not the quantity. `DefineAffine`
+  is for a unit whose **zero really moves**, never for folding a datum, a bias or
+  a calibration constant into a unit. The conversion is ONE rational expression
+  rounded once, never a shift composed with a rescale — the rule below applies to
+  it unchanged.
 - **NEVER coerce across kinds.** A length is not an angle. Converting between
   kinds returns an `error`; it is never a silent reinterpretation. `Angle` is a
   dimension of its own, never unified with `Dimensionless`; the sole carve-out

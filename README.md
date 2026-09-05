@@ -15,6 +15,9 @@ _, err = w.Convert(units.Degree)  // error: a length is not an angle
 
 a, err := units.Millimeters(2).Mul(units.Millimeters(3))  // "6 mm^2", an Area
 v, err := a.Mul(units.Millimeters(4))                     // "24 mm^3", a Volume
+
+feed, err := units.MillimetersPerSecond(60).In(units.MillimeterPerMinute) // 3600
+k, err := units.DegreesCelsius(210).In(units.Kelvin)                      // 483.15
 ```
 
 ## Why
@@ -38,11 +41,19 @@ top of it, and depends only on the standard library.
   (`Millimeter`, `Inch`, `Degree`), not by passing `"mm"` around. `Lookup` exists
   for deserialization; it is not the normal way to build a value.
 - **Kinds are dimensions, not an enumeration.** A `Kind` is a vector of exponents
-  over length, mass and angle, so kinds compose: `Mul` adds them and `Div`
-  subtracts them, and `Area`, `Volume`, `Density` (M·L⁻³), `MomentOfInertia`
-  (M·L²) and `SecondMomentOfArea` (L⁴) fall out for free. A kind nobody named —
-  an inverse length, say — is still a kind: it compares and prints (`L⁻¹`),
-  though no base unit is registered for it.
+  over length, mass, angle, time and temperature, so kinds compose: `Mul` adds
+  them and `Div` subtracts them, and `Area`, `Volume`, `Density` (M·L⁻³),
+  `MomentOfInertia` (M·L²), `SecondMomentOfArea` (L⁴), `Velocity` (L·T⁻¹) and
+  `Acceleration` (L·T⁻²) fall out for free. A kind nobody named — an inverse
+  length, say — is still a kind: it compares and prints (`L⁻¹`), though no base
+  unit is registered for it.
+- **Two units are affine, and they give up arithmetic.** `Celsius` and
+  `Fahrenheit` carry an offset as well as a factor, because their zero is not the
+  kelvin's. A value in one converts, compares, prints and persists; `Add`, `Sub`,
+  `Mul` and `Div` return `ErrAffineUnit`, because `20 °C × 2` is not `40 °C` and
+  two absolute temperatures do not add at all. Convert to `Kelvin` and the
+  arithmetic is available and correct. `DefineAffine` registers your own; every
+  other unit, `Define`'s included, is a pure ratio and behaves exactly as before.
 - **An angle is its own dimension**, even though a radian is physically a ratio
   of two lengths, so a bare number can never pass as an angle. The one carve-out
   is that `Add`/`Sub` accept an angle and a dimensionless value together.
@@ -56,8 +67,10 @@ top of it, and depends only on the standard library.
 - **Every named kind has a base unit**: the millimetre (`Length`), the square
   millimetre (`Area`), the cubic millimetre (`Volume`), the kilogram (`Mass`),
   the kilogram per cubic millimetre (`Density`), the kilogram square millimetre
-  (`MomentOfInertia`), the quartic millimetre (`SecondMomentOfArea`) and the
-  radian (`Angle`). Every unit stores its factor to its kind's base. Symbols are
+  (`MomentOfInertia`), the quartic millimetre (`SecondMomentOfArea`), the
+  radian (`Angle`), the second (`Time`), the millimetre per second (`Velocity`),
+  the millimetre per second squared (`Acceleration`) and the kelvin
+  (`Temperature`). Every unit stores its factor to its kind's base. Symbols are
   printable ASCII without the space, with a caret for an exponent: `mm^2`,
   `in^3`, `kg/m^3`. A unit whose conventional symbol is not ASCII (µm, °, Å)
   registers under an ASCII spelling (`um`, `deg`, `angstrom`), as the built-ins

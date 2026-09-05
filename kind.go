@@ -7,8 +7,10 @@ import (
 )
 
 // Kind is the physical dimension of a quantity: the exponents of the base
-// dimensions it is built from. The base dimensions are length, mass and angle;
-// there is no time, current or temperature, because this is a geometry library.
+// dimensions it is built from. The base dimensions are length, mass, angle,
+// time and temperature. There is no electric current, amount of substance or
+// luminous intensity: nothing this library serves measures one, and a
+// dimension nobody uses is a dimension nobody maintains.
 //
 // Kind is comparable: two kinds are equal exactly when their exponents match and
 // neither has overflowed (see [Kind.Overflowed]). The zero value is
@@ -24,14 +26,20 @@ import (
 // (curvature), say — compare correctly and print readably even though no
 // constant names them and no base unit is registered for them.
 //
-// Exponents are stored as int8, so each ranges over [-128, 127]. Geometry never
-// approaches that: L⁴ (a second moment of area) is as exotic as it gets. A
-// composition that would exceed the range is a programming error rather than a
-// meaningful kind, and it is recorded as one: the exponent is clamped to the
-// endpoint and the kind is marked overflowed. See [Kind.Overflowed].
+// Temperature is a dimension of its own, and it is the one dimension whose
+// units are not all pure ratios: a degree Celsius is offset from the kelvin as
+// well as scaled against it. See [Unit] for what an affine unit may and may not
+// do.
+//
+// Exponents are stored as int8, so each ranges over [-128, 127]. Nothing this
+// library serves approaches that: L⁴ (a second moment of area) is as exotic as
+// it gets. A composition that would exceed the range is a programming error
+// rather than a meaningful kind, and it is recorded as one: the exponent is
+// clamped to the endpoint and the kind is marked overflowed. See
+// [Kind.Overflowed].
 type Kind struct {
-	l, m, a int8 // exponents of length, mass and angle
-	ovf     bool // an exponent saturated; sticky, and never cleared
+	l, m, a, t, th int8 // exponents of length, mass, angle, time and temperature
+	ovf            bool // an exponent saturated; sticky, and never cleared
 }
 
 // Dimensionless, and the kinds below it, are the named kinds: the dimensions
@@ -55,6 +63,14 @@ var (
 	MomentOfInertia = Kind{l: 2, m: 1}
 	// SecondMomentOfArea is L⁴.
 	SecondMomentOfArea = Kind{l: 4}
+	// Time is a duration; its base unit is the second.
+	Time = Kind{t: 1}
+	// Velocity is L·T⁻¹; its base unit is the millimetre per second.
+	Velocity = Kind{l: 1, t: -1}
+	// Acceleration is L·T⁻²; its base unit is the millimetre per second squared.
+	Acceleration = Kind{l: 1, t: -2}
+	// Temperature is a thermodynamic temperature; its base unit is the kelvin.
+	Temperature = Kind{th: 1}
 )
 
 // kindNames holds the human-readable name of every named kind. A kind absent
@@ -70,6 +86,10 @@ var kindNames = map[Kind]string{
 	Density:            "density",
 	MomentOfInertia:    "moment of inertia",
 	SecondMomentOfArea: "second moment of area",
+	Time:               "time",
+	Velocity:           "velocity",
+	Acceleration:       "acceleration",
+	Temperature:        "temperature",
 }
 
 // Overflowed reports whether an exponent of this kind saturated: the kind is a
@@ -93,7 +113,9 @@ func (k Kind) Mul(o Kind) Kind {
 	l, lo := clampExp(int64(k.l) + int64(o.l))
 	m, mo := clampExp(int64(k.m) + int64(o.m))
 	a, ao := clampExp(int64(k.a) + int64(o.a))
-	return Kind{l: l, m: m, a: a, ovf: k.ovf || o.ovf || lo || mo || ao}
+	t, to := clampExp(int64(k.t) + int64(o.t))
+	th, tho := clampExp(int64(k.th) + int64(o.th))
+	return Kind{l: l, m: m, a: a, t: t, th: th, ovf: k.ovf || o.ovf || lo || mo || ao || to || tho}
 }
 
 // Div returns the kind of a quotient: the exponents of o subtracted from those
@@ -103,7 +125,9 @@ func (k Kind) Div(o Kind) Kind {
 	l, lo := clampExp(int64(k.l) - int64(o.l))
 	m, mo := clampExp(int64(k.m) - int64(o.m))
 	a, ao := clampExp(int64(k.a) - int64(o.a))
-	return Kind{l: l, m: m, a: a, ovf: k.ovf || o.ovf || lo || mo || ao}
+	t, to := clampExp(int64(k.t) - int64(o.t))
+	th, tho := clampExp(int64(k.th) - int64(o.th))
+	return Kind{l: l, m: m, a: a, t: t, th: th, ovf: k.ovf || o.ovf || lo || mo || ao || to || tho}
 }
 
 // Pow returns the kind of k raised to the n-th power: the exponents of k scaled
@@ -115,7 +139,9 @@ func (k Kind) Pow(n int) Kind {
 	l, lo := scaleExp(k.l, n)
 	m, mo := scaleExp(k.m, n)
 	a, ao := scaleExp(k.a, n)
-	return Kind{l: l, m: m, a: a, ovf: k.ovf || lo || mo || ao}
+	t, to := scaleExp(k.t, n)
+	th, tho := scaleExp(k.th, n)
+	return Kind{l: l, m: m, a: a, t: t, th: th, ovf: k.ovf || lo || mo || ao || to || tho}
 }
 
 // String returns the name of a named kind ("area", "density", …), or the
@@ -132,7 +158,7 @@ func (k Kind) String() string {
 		return name
 	}
 
-	parts := make([]string, 0, 3)
+	parts := make([]string, 0, 5)
 	for _, d := range k.dimensions() {
 		if d.exp != 0 {
 			parts = append(parts, d.symbol+superscript(d.exp))
@@ -147,7 +173,8 @@ func (k Kind) String() string {
 
 // canonicalSymbol returns the synthetic unit symbol a value of this kind is
 // carried in when the kind has no registered base unit: an ASCII exponent form
-// in the fixed order length, mass, angle, wrapped in brackets — "[L^-1]",
+// in the fixed order length, mass, angle, time, temperature, wrapped in
+// brackets — "[L^-1]",
 // "[L^2*M]". An overflowed kind has no exponents worth writing and gets
 // "[overflow]", which no dimension form can collide with. The brackets are a
 // reserved namespace ([Define] rejects a symbol that opens with one), so a
@@ -158,7 +185,7 @@ func (k Kind) canonicalSymbol() string {
 		return "[overflow]"
 	}
 
-	parts := make([]string, 0, 3)
+	parts := make([]string, 0, 5)
 	for _, d := range k.dimensions() {
 		switch d.exp {
 		case 0:
@@ -182,11 +209,16 @@ type dimension struct {
 	exp    int8
 }
 
-// dimensions returns k's exponents in the fixed order length, mass, angle. Both
-// the display form and the canonical symbol iterate it, so the two never drift
-// apart in ordering.
-func (k Kind) dimensions() [3]dimension {
-	return [3]dimension{{"L", k.l}, {"M", k.m}, {"A", k.a}}
+// dimensions returns k's exponents in the fixed order length, mass, angle,
+// time, temperature. Both the display form and the canonical symbol iterate it,
+// so the two never drift apart in ordering.
+//
+// Time and temperature come last, after the three dimensions that were here
+// first, and a zero exponent is written by neither form. A kind that predates
+// them therefore renders exactly as it always did: "[L^-1]" is still "[L^-1]",
+// and no document written before they existed resolves to a different kind now.
+func (k Kind) dimensions() [5]dimension {
+	return [5]dimension{{"L", k.l}, {"M", k.m}, {"A", k.a}, {"T", k.t}, {"K", k.th}}
 }
 
 // clampExp narrows a computed exponent to the int8 range that a [Kind] stores,
