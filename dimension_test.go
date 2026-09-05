@@ -144,7 +144,6 @@ func TestNewKindsHaveBaseUnits(t *testing.T) {
 			require.True(t, ok)
 			require.Equal(t, tc.want, got)
 			require.Equal(t, 1.0, got.Factor())
-			require.False(t, got.Affine())
 		})
 	}
 }

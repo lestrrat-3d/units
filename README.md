@@ -17,7 +17,7 @@ a, err := units.Millimeters(2).Mul(units.Millimeters(3))  // "6 mm^2", an Area
 v, err := a.Mul(units.Millimeters(4))                     // "24 mm^3", a Volume
 
 feed, err := units.MillimetersPerSecond(60).In(units.MillimeterPerMinute) // 3600
-k, err := units.DegreesCelsius(210).In(units.Kelvin)                      // 483.15
+k, err := units.DegreesCelsius(210).ToRatio(units.Kelvin)                 // "483.15 K"
 ```
 
 ## Why
@@ -47,13 +47,14 @@ top of it, and depends only on the standard library.
   `Acceleration` (L·T⁻²) fall out for free. A kind nobody named — an inverse
   length, say — is still a kind: it compares and prints (`L⁻¹`), though no base
   unit is registered for it.
-- **Two units are affine, and they give up arithmetic.** `Celsius` and
-  `Fahrenheit` carry an offset as well as a factor, because their zero is not the
-  kelvin's. A value in one converts, compares, prints and persists; `Add`, `Sub`,
-  `Mul` and `Div` return `ErrAffineUnit`, because `20 °C × 2` is not `40 °C` and
-  two absolute temperatures do not add at all. Convert to `Kelvin` and the
-  arithmetic is available and correct. `DefineAffine` registers your own; every
-  other unit, `Define`'s included, is a pure ratio and behaves exactly as before.
+- **A scale whose zero moved is a different type.** `Celsius` and `Fahrenheit` are
+  `AffineUnit`s carrying an `AffineValue`, because their zero is not the kelvin's.
+  An `AffineValue` converts, compares, prints and persists, and has no `Add`,
+  `Sub`, `Mul`, `Div`, `Scale` or `Neg` at all — not a version that returns an
+  error, no version — because `20 °C × 2` is not `40 °C` and two absolute
+  temperatures do not add. `units.New(20, units.Celsius)` does not compile. Cross
+  over with `ToRatio` and the arithmetic is there and correct. Every `Unit` is a
+  pure ratio, so every method on `Value` is meaningful for every `Value`.
 - **An angle is its own dimension**, even though a radian is physically a ratio
   of two lengths, so a bare number can never pass as an angle. The one carve-out
   is that `Add`/`Sub` accept an angle and a dimensionless value together.

@@ -45,17 +45,6 @@ var ErrDivideByZero = errors.New("units: division by zero")
 // scales a value up past the float64 range, gets a non-finite Value back.
 var ErrNotFinite = errors.New("units: result is not finite")
 
-// ErrAffineUnit is returned by [Value.Add], [Value.Sub], [Value.Mul] and [Value.Div]
-// when either operand is carried in an affine unit — one whose zero is not its kind's
-// base zero, such as [Celsius] or [Fahrenheit]. See [Unit] for why those operations
-// have no answer to give: 20 °C doubled is not 40 °C, and two absolute temperatures do
-// not add. Convert to the kind's base unit ([Kelvin]) and the arithmetic is available
-// and correct.
-//
-// Conversion, comparison, printing and the text form are unaffected: an affine unit is
-// a unit, and a quantity carried in one is a quantity.
-var ErrAffineUnit = errors.New("units: an affine unit has no arithmetic")
-
 // ErrUnnamedKind is returned by [Value.MarshalText] for a value of an unnamed kind.
 // Such a value carries a synthetic, unregistered unit whose symbol is bracketed
 // ("[L^-1]"), and [Lookup] resolves nothing in that namespace: a text form carrying
@@ -172,12 +161,9 @@ func New(mag float64, u Unit) Value { return Value{mag: canonicalZero(mag), unit
 // carried in unit u. For example FromBase(1000, Meter) is 1 m. Like [New] it
 // reports no error and so does not check base: an infinite or NaN base yields a
 // non-finite Value. A zero magnitude is a +0, as everywhere else.
-// The offset is removed before the scale, which is the inverse of [Value.Base]'s
-// scale-then-shift; for a ratio unit the offset is zero and this is the plain
-// division it always was.
 func FromBase(base float64, u Unit) Value {
 	u = u.normalize()
-	return Value{mag: canonicalZero((base - u.offset) / u.factor), unit: u}
+	return Value{mag: canonicalZero(base / u.factor), unit: u}
 }
 
 // Millimeters, and the constructors below it, build a Value of x in each of the
@@ -226,13 +212,11 @@ func MillimetersPerMinute(x float64) Value { return New(x, MillimeterPerMinute) 
 func MillimetersPerSecondSquared(x float64) Value { return New(x, MillimeterPerSecondSquared) }
 func MetersPerSecondSquared(x float64) Value      { return New(x, MeterPerSecondSquared) }
 
-// Kelvins, and the three constructors below it, build a temperature. DegreesCelsius
-// and DegreesFahrenheit carry an affine unit, so the value they return converts,
-// compares and persists but does no arithmetic; see [ErrAffineUnit].
-func Kelvins(x float64) Value           { return New(x, Kelvin) }
-func DegreesRankine(x float64) Value    { return New(x, Rankine) }
-func DegreesCelsius(x float64) Value    { return New(x, Celsius) }
-func DegreesFahrenheit(x float64) Value { return New(x, Fahrenheit) }
+// Kelvins and DegreesRankine build a temperature on a ratio scale. The Celsius
+// and Fahrenheit scales are affine, so their quantities are an [AffineValue]:
+// see [DegreesCelsius] and [DegreesFahrenheit].
+func Kelvins(x float64) Value        { return New(x, Kelvin) }
+func DegreesRankine(x float64) Value { return New(x, Rankine) }
 
 // Mag returns the magnitude in the value's own unit. It is never a −0: a Value
 // does not carry one.
@@ -256,14 +240,7 @@ func (v Value) Kind() Kind { return v.unit.kind }
 // A zero base magnitude is +0, including one a negative quantity underflowed to:
 // the sign of a zero is not a property of the quantity, here as everywhere else in
 // the package.
-//
-// For an affine unit the shift is applied after the scale — Celsius(0).Base() is
-// 273.15, the kelvin it is — so a zero magnitude in such a unit has a nonzero base
-// magnitude, which is the whole point of the unit.
-func (v Value) Base() float64 {
-	u := v.Unit()
-	return canonicalZero(v.mag*u.factor + u.offset)
-}
+func (v Value) Base() float64 { return canonicalZero(v.mag * v.Unit().factor) }
 
 // In returns the magnitude expressed in unit u, or [ErrIncompatible] if u
 // measures a different kind. A magnitude that is not finite in u — a value built
@@ -271,15 +248,11 @@ func (v Value) Base() float64 {
 // [ErrNotFinite]. A value is always expressible in the unit it already carries,
 // however large its base magnitude. A zero comes back as +0, in u as in every
 // other unit — a conversion cannot make a quantity negative.
-// Converting between two units that are both ratios is unchanged, down to the
-// bit. An affine unit on either side adds the two zeros to the arithmetic, and
-// [convert] does the whole of it in one step rather than a shift followed by a
-// rescale.
 func (v Value) In(u Unit) (float64, error) {
 	if v.unit.kind != u.kind {
 		return 0, fmt.Errorf("%w: cannot express %s in %s", ErrIncompatible, v.unit.kind, u.kind)
 	}
-	m := convert(v.mag, v.Unit(), u.normalize())
+	m := rescale(v.mag, v.Unit().factor, u.Factor())
 	if !isFinite(m) {
 		return 0, fmt.Errorf("%w: cannot express %s in %s", ErrNotFinite, v, u)
 	}
@@ -323,13 +296,6 @@ func (v Value) Sub(o Value) (Value, error) { return v.combine(o, -1) }
 func (v Value) combine(o Value, sign float64) (Value, error) {
 	vu, ou := v.Unit(), o.Unit()
 
-	// Two absolute temperatures do not add, and a unit whose zero is not its
-	// kind's zero cannot say which of the two zeros the result is counted from.
-	// See [ErrAffineUnit].
-	if vu.Affine() || ou.Affine() {
-		return Value{}, fmt.Errorf("%w: cannot combine %s with %s", ErrAffineUnit, v, o)
-	}
-
 	// The sum is carried in v's unit, except in the angle/dimensionless carve-out
 	// entered from the dimensionless side, where it is carried in o's — so the
 	// sum is an angle whichever operand the angle was.
@@ -371,12 +337,6 @@ func isAngleScalarPair(a, b Kind) bool {
 // that lands on the last float64 is that float64. A product whose true value is
 // past the last float64, or that is a NaN, is [ErrNotFinite].
 func (v Value) Mul(o Value) (Value, error) {
-	// Multiplication is a statement about a ratio, and an affine unit's zero is
-	// not the absence of the quantity, so there is no ratio to state. See
-	// [ErrAffineUnit].
-	if v.Unit().Affine() || o.Unit().Affine() {
-		return Value{}, fmt.Errorf("%w: cannot multiply %s by %s", ErrAffineUnit, v, o)
-	}
 	p := product(v.mag, v.Unit().factor, o.mag, o.Unit().factor)
 	if !isFinite(p) {
 		return Value{}, fmt.Errorf("%w: cannot multiply %s by %s", ErrNotFinite, v, o)
@@ -396,12 +356,6 @@ func (v Value) Mul(o Value) (Value, error) {
 // carry the true quotient past the last float64, or to make it a NaN, is
 // [ErrNotFinite].
 func (v Value) Div(o Value) (Value, error) {
-	// A quotient is a ratio, and an affine unit has no zero to take a ratio
-	// against. See [ErrAffineUnit].
-	if v.Unit().Affine() || o.Unit().Affine() {
-		return Value{}, fmt.Errorf("%w: cannot divide %s by %s", ErrAffineUnit, v, o)
-	}
-
 	// The divisor's own magnitude is the guard, never its base magnitude: a unit's
 	// factor is positive and finite, so a magnitude is zero exactly when the
 	// quantity is. A base magnitude would say zero for an ordinary small divisor
@@ -551,47 +505,6 @@ func rescale(m, from, to float64) float64 {
 	return exact(new(big.Rat).Quo(baseRat(m, from), new(big.Rat).SetFloat64(to)))
 }
 
-// convert returns m, carried in unit from, expressed in unit to. Between two
-// ratio units it is exactly [rescale] — the same helper, the same rounding, the
-// same result bit for bit — so nothing about a conversion that existed before
-// affine units did has changed.
-//
-// With an affine unit on either side the conversion is
-// (m × from.factor + from.offset − to.offset) ÷ to.factor, and it is one step:
-// shifting into base units and then rescaling would be the composition this
-// package refuses everywhere else, rounding the shifted magnitude before the
-// division can use it. The whole expression is evaluated in exact rationals and
-// rounded once, which is what [exact] gives and what the ends of the range need
-// anyway. Temperatures live in the middle of the float64 range, so the cost of
-// always taking the rational path here is paid where nothing notices it.
-//
-// A non-finite magnitude has no exact rational, so it keeps the float64
-// expression and propagates as it would have.
-func convert(m float64, from, to Unit) float64 {
-	if from.offset == 0 && to.offset == 0 {
-		return rescale(m, from.factor, to.factor)
-	}
-	if !exactly(m, from.factor, from.offset, to.factor, to.offset) || to.factor == 0 {
-		return canonicalZero((m*from.factor + from.offset - to.offset) / to.factor)
-	}
-	n := baseRat(m, from.factor)
-	n.Add(n, new(big.Rat).SetFloat64(from.offset))
-	n.Sub(n, new(big.Rat).SetFloat64(to.offset))
-	return exact(n.Quo(n, new(big.Rat).SetFloat64(to.factor)))
-}
-
-// baseRatOf returns v's base magnitude as an exact rational:
-// mag × factor + offset, the rational counterpart of [Value.Base], which — unlike
-// the float64 one — can neither overflow nor underflow.
-func baseRatOf(v Value) *big.Rat {
-	u := v.Unit()
-	r := baseRat(v.mag, u.factor)
-	if u.offset == 0 {
-		return r
-	}
-	return r.Add(r, new(big.Rat).SetFloat64(u.offset))
-}
-
 // product returns (a × af) × (b × bf): two magnitudes multiplied in base units.
 // The mantissas are grouped as the plain expression groups them, so the rounding is
 // the plain expression's; at the ends of the range the true product is rounded once
@@ -683,14 +596,10 @@ func sum(a, af, sign, b, bf, to float64) float64 {
 // whenever float64 holds it. A result that is zero — a zero v, a zero f, or a product
 // that underflows — is +0, whatever the signs that produced it.
 //
-// # Scale is meaningless for an affine unit
-//
-// [Value.Mul] refuses an affine operand ([ErrAffineUnit]) because scaling a quantity
-// whose zero is not its kind's zero has no answer. Scale has no error to return, so it
-// cannot refuse: it scales the magnitude in v's own unit, and Celsius(20).Scale(2) is
-// 40 degC — which is 313.15 K, not the 586.3 K that doubling the temperature would be.
-// Convert to [Kelvin] first, or use Mul with a [Scalar] and let it refuse. Check
-// [Unit.Affine] where a caller may hand you either.
+// Scaling is meaningful for every Value, because every [Unit] is a ratio: a
+// quantity's zero is the absence of the quantity, so doubling it is doubling it.
+// A scale whose zero sits elsewhere is an [AffineUnit], whose [AffineValue] has no
+// Scale to call.
 func (v Value) Scale(f float64) Value { return Value{canonicalZero(v.mag * f), v.unit} }
 
 // Neg returns −v. It reports no error and cannot make a finite magnitude
@@ -701,10 +610,8 @@ func (v Value) Scale(f float64) Value { return Value{canonicalZero(v.mag * f), v
 // would print as "-0" and read as negative under [math.Signbit] though the quantity
 // is neither. See [Value].
 //
-// Like [Value.Scale] it has no error to return, so it negates the magnitude in v's
-// own unit even where that is not the negation of the quantity: Celsius(20).Neg() is
-// −20 degC, which is 253.15 K rather than the −293.15 K a negated temperature would
-// be. Convert to [Kelvin] first where the quantity is what must be negated.
+// Like [Value.Scale] it is meaningful for every Value, because every [Unit] is a
+// ratio; see there.
 func (v Value) Neg() Value { return Value{canonicalZero(-v.mag), v.unit} }
 
 // Equal reports whether v and o represent the same quantity to within tol of the
@@ -777,10 +684,7 @@ func (v Value) Equal(o Value, tol float64) bool {
 	// arithmetic, and so no rounding, stands between the operands and that answer. A
 	// value therefore equals itself however large its base magnitude, and equal
 	// magnitudes in one unit are equal at every tolerance a real number can take.
-	// The two units must agree on their zero as well as their size for equal
-	// magnitudes to be the same quantity: 0 degC and 0 K share a factor and are
-	// 273.15 K apart.
-	if vu.factor == ou.factor && vu.offset == ou.offset {
+	if vu.factor == ou.factor {
 		if v.mag == o.mag {
 			return tol >= 0
 		}
@@ -798,20 +702,15 @@ func (v Value) Equal(o Value, tol float64) bool {
 	if tol < 0 {
 		return false
 	}
-	// The integer fast path reads factors alone, so it is kept for the ratio units
-	// it was written for; an affine operand goes straight to the rationals below,
-	// which carry the offsets.
-	if vu.offset == 0 && ou.offset == 0 {
-		if equal, ok := exactEqual(v.mag, vu.factor, o.mag, ou.factor, tol); ok {
-			return equal
-		}
+	if equal, ok := exactEqual(v.mag, vu.factor, o.mag, ou.factor, tol); ok {
+		return equal
 	}
 
-	// A float64 magnitude, factor and offset are exact rationals, so the true
+	// A float64 magnitude and a float64 factor are exact rationals, so the true
 	// difference in base units is one too, whatever the two units are and however far
 	// apart their factors. It is compared with tol there, exactly: nothing is rounded,
 	// and swapping the operands only negates it.
-	d := new(big.Rat).Sub(baseRatOf(v), baseRatOf(o))
+	d := new(big.Rat).Sub(baseRat(v.mag, vu.factor), baseRat(o.mag, ou.factor))
 	return d.Abs(d).Cmp(new(big.Rat).SetFloat64(tol)) <= 0
 }
 
