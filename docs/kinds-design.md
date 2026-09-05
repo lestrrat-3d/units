@@ -38,24 +38,45 @@ division subtracts them, and every derived quantity falls out for free.
 // Kind is comparable: two kinds are equal exactly when their exponents match and
 // neither has overflowed.
 type Kind struct {
-    l, m, a int8 // length, mass, angle
-    ovf     bool // an exponent saturated; sticky (see §4)
+    l, m, a, t, th int8 // length, mass, angle, time, temperature
+    ovf            bool // an exponent saturated; sticky (see §4)
 }
 ```
 
-Three base dimensions, because three is what this domain needs:
+Five base dimensions:
 
 | | Why |
 |---|---|
 | **Length** (`l`) | the base of all geometry: length, area, volume, inertia |
 | **Mass** (`m`) | mass properties: mass, density, moment of inertia |
 | **Angle** (`a`) | **see below — this one is a judgment call, not physics** |
+| **Time** (`t`) | rates: velocity, acceleration, feedrate, duration |
+| **Temperature** (`th`) | a process temperature; **the one dimension with affine units** |
 
-There is no time, current, or temperature. This is a geometry library; a
-quantity that needs seconds does not belong in it. Exponents are `int8` — `L⁴` is
-as exotic as it gets — so the whole `Kind` stays a handful of bytes and comparable
-with `==`, and it carries one bit besides the exponents: the overflow mark, which
-§4 explains.
+There is no electric current, amount of substance or luminous intensity: nothing
+this library serves measures one, and a dimension nobody uses is a dimension
+nobody maintains. Exponents are `int8` — `L⁴` is as exotic as it gets — so the
+whole `Kind` stays a handful of bytes and comparable with `==`, and it carries
+one bit besides the exponents: the overflow mark, which §4 explains.
+
+### Time and temperature came later, and cost nothing that existed
+
+This document once read *"there is no time, current, or temperature. This is a
+geometry library; a quantity that needs seconds does not belong in it."* That held
+while the consumers were `sketch` and `decad`, which model shapes. It stopped
+holding when a consumer arrived that drives a **machine**: a slicer, whose process
+settings are feedrates in mm/s, accelerations in mm/s² and nozzle temperatures in
+°C. Those are quantities, and a quantity outside the type system is the bare
+`float64` this library exists to abolish.
+
+Widening the model is safe because the two new exponents sit **after** the three
+that were here first, and a zero exponent is written by neither the display form
+nor the canonical symbol:
+
+- `Length`, `Angle` and every other existing kind are unchanged values.
+- An unnamed kind still renders as it did: `Kind{l: -1}` is `L⁻¹` and `[L^-1]`,
+  never `L⁻¹·T⁰`.
+- No persisted document resolves to a different kind than it did before.
 
 ### Angle is tracked, though physics says it is dimensionless
 
@@ -97,6 +118,10 @@ var (
     Density       = Kind{l: -3, m: 1}   // M·L⁻³
     MomentOfInertia = Kind{l: 2, m: 1}  // M·L²
     SecondMomentOfArea = Kind{l: 4}     // L⁴
+    Time          = Kind{t: 1}
+    Velocity      = Kind{l: 1, t: -1}   // L·T⁻¹
+    Acceleration  = Kind{l: 1, t: -2}   // L·T⁻²
+    Temperature   = Kind{th: 1}
 )
 ```
 
@@ -714,10 +739,64 @@ The compile-time breakage is small and mechanical:
 `sketch` is pre-1.0 with no tags, and its only consumer is `decad`, which has no
 code yet. This is the cheapest this migration will ever be.
 
-## 8. Non-goals
+## 8. Affine units
 
-Time, current, temperature and the rest of SI — this is a geometry library.
-Unit *parsing* from arbitrary strings (`Lookup` by symbol is for deserialization,
+Every unit but two is a pure ratio: `base == magnitude × factor`, and zero in one
+unit is zero in every other. The degree Celsius is not. It has the kelvin's size
+but a different zero, so reaching the base unit is a scale **and** a shift:
+
+```go
+type Unit struct {
+    symbol string
+    kind   Kind
+    factor float64 // magnitude * factor + offset == magnitude in the base unit
+    offset float64 // zero for every ratio unit, which is nearly all of them
+}
+```
+
+`Define` builds ratio units only, so every unit that predates this change is
+unchanged and every conversion between two of them is the same helper, the same
+rounding, and the same result bit for bit. `DefineAffine` is the way in, and
+`Unit.Affine()` reports the result.
+
+### An affine unit gives up arithmetic
+
+This is the part that matters. A value in an affine unit **converts, compares,
+prints and persists**, and `Add`, `Sub`, `Mul` and `Div` return `ErrAffineUnit`
+rather than a number.
+
+They are refused because they have no answer to give:
+
+- `20 °C × 2` is not `40 °C`. Doubling states a ratio, and `0 °C` is not the
+  absence of temperature, so there is no ratio to double.
+- `20 °C + 5 °C` is not `25 °C`. Two absolute temperatures do not add. Only a
+  temperature and a *difference* do, and a temperature difference is a separate
+  quantity this library does not model.
+
+Every answer those operations could return is wrong in a way the caller cannot
+see, which is the one failure mode this library exists to prevent. Converting to
+`Kelvin` — a ratio unit — buys the arithmetic back, correct.
+
+`Value.Scale` and `Value.Neg` have no error to return and so cannot refuse; each
+documents that it operates on the magnitude in the value's own unit, and that this
+is not the quantity for an affine unit.
+
+### Why the conversion is one step
+
+`In` through an affine unit is
+`(m × from.factor + from.offset − to.offset) ÷ to.factor`, evaluated whole in
+exact rationals and rounded once. Shifting into base units and then rescaling
+would be the composition this library refuses everywhere else: the rounding
+between the two steps happens before the division can use the bits it destroyed.
+Temperatures sit in the middle of the float64 range, so always taking the
+rational path costs nothing anyone measures.
+
+## 9. Non-goals
+
+Electric current, amount of substance, luminous intensity and the rest of SI —
+nothing this library serves measures one. A temperature **difference** as a kind
+distinct from an absolute temperature (see §8: the arithmetic is refused rather
+than modelled). Unit *parsing* from arbitrary strings (`Lookup` by symbol is for deserialization,
 not a expression parser; `sketch/param` owns expressions; `UnmarshalText` reads the
 one text form this library writes, and nothing else). Automatic unit *selection*
 for display (that is `System`'s job). Compound symbol synthesis for unnamed kinds

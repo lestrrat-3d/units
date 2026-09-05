@@ -34,11 +34,55 @@ import (
 // so a conversion through a unit is always well defined. The zero Unit is [One]:
 // its factor field is 0, which is not a usable multiplier, so it is read as the
 // dimensionless factor-1 unit it otherwise already is.
+//
+// # Affine units
+//
+// Almost every unit is a pure ratio: a magnitude times a factor is the same
+// quantity in the kind's base unit, and zero in one unit is zero in every
+// other. A few are not. The degree Celsius has the kelvin's size but a
+// different zero, so converting to the base unit is a scale *and* a shift:
+// base == magnitude × factor + offset. Such a unit is affine, and
+// [Unit.Affine] reports it.
+//
+// An affine unit is registered by [DefineAffine]; [Define] builds ratio units
+// only, so every unit that existed before affine units did is a ratio unit and
+// behaves exactly as it did. The built-in affine units are [Celsius] and
+// [Fahrenheit].
+//
+// # What an affine unit may not do
+//
+// A quantity in an affine unit can be converted, compared, printed and
+// persisted. It cannot be added, subtracted, multiplied or divided, and every
+// one of those returns [ErrAffineUnit] rather than a number.
+//
+// The reason is that the arithmetic has no answer to give. 20 °C doubled is not
+// 40 °C, because doubling is a statement about a ratio and 0 °C is not the
+// absence of temperature; 20 °C plus 5 °C is not 25 °C, because two absolute
+// temperatures do not add at all — only a temperature and a *difference* do,
+// and a difference is a separate quantity this library does not model. Every
+// answer such an operation could return would be wrong in a way the caller
+// could not see, so it returns an error instead. Convert to [Kelvin], which is
+// a ratio unit, and the arithmetic is available and correct.
+//
+// [Value.Scale] and [Value.Neg] have no error to report, and they are the one
+// place this cannot be enforced; each says so in its own documentation.
 type Unit struct {
 	symbol string
 	kind   Kind
-	factor float64 // magnitude * factor == magnitude in the kind's base unit
+	factor float64 // magnitude * factor + offset == magnitude in the kind's base unit
+	offset float64 // zero for every ratio unit, which is nearly all of them
 }
+
+// Affine reports whether the unit's zero differs from its kind's base unit
+// zero, so that converting through it is a shift as well as a scale. It is
+// false for every unit [Define] builds and true for [Celsius] and [Fahrenheit];
+// see [Unit] for what an affine unit may not do.
+func (u Unit) Affine() bool { return u.offset != 0 }
+
+// Offset returns the constant added after scaling to reach the kind's base
+// unit: magnitude × factor + offset. It is zero for every ratio unit, the zero
+// Unit ([One]) included.
+func (u Unit) Offset() float64 { return u.normalize().offset }
 
 // normalize reads the zero Unit as [One]. Every registered or synthetic unit has
 // a positive, finite factor, so a factor of 0 identifies the zero value and
@@ -125,6 +169,35 @@ var (
 	// Radian and Degree measure [Angle]; the radian is the base unit.
 	Radian = defineBase("rad", Angle)
 	Degree = define("deg", Angle, math.Pi/180)
+
+	// Second, and the time units below it, measure [Time]; the second is the
+	// base unit.
+	Second      = defineBase("s", Time)
+	Millisecond = define("ms", Time, 0.001)
+	Minute      = define("min", Time, 60)
+	Hour        = define("h", Time, 3600)
+
+	// MillimeterPerSecond, and the units below it, measure [Velocity]; the
+	// millimetre per second is the base unit. MillimeterPerMinute is the unit a
+	// gcode feedrate is written in.
+	MillimeterPerSecond = defineBase("mm/s", Velocity)
+	MeterPerSecond      = define("m/s", Velocity, 1000)
+	MillimeterPerMinute = define("mm/min", Velocity, 1.0/60.0)
+
+	// MillimeterPerSecondSquared and MeterPerSecondSquared measure
+	// [Acceleration]; the millimetre per second squared is the base unit.
+	MillimeterPerSecondSquared = defineBase("mm/s^2", Acceleration)
+	MeterPerSecondSquared      = define("m/s^2", Acceleration, 1000)
+
+	// Kelvin, and the temperature units below it, measure [Temperature]; the
+	// kelvin is the base unit. Celsius and Fahrenheit are affine — their zeros
+	// are not the kelvin's — so they convert, compare and persist but do not do
+	// arithmetic; see [Unit] and [ErrAffineUnit]. Rankine shares the kelvin's
+	// zero and is an ordinary ratio unit.
+	Kelvin     = defineBase("K", Temperature)
+	Rankine    = define("degR", Temperature, 5.0/9.0)
+	Celsius    = defineAffine("degC", Temperature, 1, 273.15)
+	Fahrenheit = defineAffine("degF", Temperature, 5.0/9.0, 459.67*5.0/9.0)
 )
 
 // registry maps symbols back to units for serialization and lookup. It is
@@ -213,12 +286,27 @@ func checkSymbol(symbol string) {
 }
 
 func define(symbol string, kind Kind, factor float64) Unit {
+	return defineAffine(symbol, kind, factor, 0)
+}
+
+// defineAffine is define with an offset: base == magnitude × factor + offset. An
+// offset of 0 is an ordinary ratio unit, which is what define builds.
+//
+// The offset must be finite, and it is the one field with no sign or magnitude
+// requirement beyond that: a unit whose zero sits below its kind's base zero is
+// as legitimate as one above it. It may not be a NaN or an infinity, for the
+// reason a factor may not — every quantity expressed in such a unit would come
+// back as a NaN, which is not a conversion but the loss of one.
+func defineAffine(symbol string, kind Kind, factor, offset float64) Unit {
 	checkSymbol(symbol)
 	if strings.HasPrefix(symbol, "[") {
 		panic("units: unit symbol namespace is reserved: " + strconv.Quote(symbol))
 	}
 	if factor <= 0 || math.IsInf(factor, 0) || math.IsNaN(factor) {
 		panic("units: unit factor must be positive and finite: " + strconv.FormatFloat(factor, 'g', -1, 64))
+	}
+	if math.IsInf(offset, 0) || math.IsNaN(offset) {
+		panic("units: unit offset must be finite: " + strconv.FormatFloat(offset, 'g', -1, 64))
 	}
 	if kind.Overflowed() {
 		panic("units: unit kind has overflowed: " + strconv.Quote(symbol))
@@ -230,7 +318,9 @@ func define(symbol string, kind Kind, factor float64) Unit {
 	if _, dup := registry[symbol]; dup {
 		panic("units: unit symbol already defined: " + strconv.Quote(symbol))
 	}
-	u := Unit{symbol: symbol, kind: kind, factor: factor}
+	// A -0 offset is a 0 offset: the sign of a zero is not a property of a unit,
+	// and Affine reads offset != 0, which a -0 would pass while shifting nothing.
+	u := Unit{symbol: symbol, kind: kind, factor: factor, offset: canonicalZero(offset)}
 	registry[symbol] = u
 	return u
 }
@@ -309,6 +399,33 @@ func defineBase(symbol string, kind Kind) Unit {
 // and [BaseUnit].
 func Define(symbol string, kind Kind, factorToBase float64) Unit {
 	return define(symbol, kind, factorToBase)
+}
+
+// DefineAffine registers and returns a new affine unit measuring kind, whose
+// magnitudes reach the kind's base unit by magnitude × factorToBase +
+// offsetToBase. It is [Define] with a shifted zero, and every rule Define
+// documents — the symbol grammar, the reserved "[" namespace, uniqueness, the
+// positive finite factor, the non-overflowed kind, and registering nothing when
+// it panics — applies here unchanged.
+//
+// offsetToBase must be finite: DefineAffine panics on an infinite or NaN offset,
+// for the reason Define panics on an unusable factor. An offsetToBase of zero
+// builds an ordinary ratio unit, exactly as Define does.
+//
+// # Use it only where the zero really does move
+//
+// An affine unit is a restricted unit, not a richer one: a [Value] carrying one
+// converts, compares, prints and persists, but cannot be added, subtracted,
+// multiplied or divided ([ErrAffineUnit]). Reach for it only where a unit's zero
+// genuinely differs from its kind's base zero — the degree Celsius against the
+// kelvin — and never as a way to fold a datum, a bias or a calibration constant
+// into a unit. Those are quantities, and they belong in the arithmetic that an
+// affine unit gives up.
+//
+// DefineAffine is safe to call from multiple goroutines, concurrently with
+// [Define], [Lookup] and [BaseUnit].
+func DefineAffine(symbol string, kind Kind, factorToBase, offsetToBase float64) Unit {
+	return defineAffine(symbol, kind, factorToBase, offsetToBase)
 }
 
 // Lookup returns the unit previously registered for symbol. It is intended for
