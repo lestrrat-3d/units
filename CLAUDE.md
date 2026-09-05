@@ -6,8 +6,9 @@ Update when a design variable gets resolved.
 ## What this is
 
 A small, self-contained **units-of-measure** library in Go. A `Unit` is a symbol
-+ `Kind` + conversion factor (+ an offset, for the two affine units); a `Value`
-is a magnitude + its `Unit`. A `Kind` is a vector of dimension exponents (length,
++ `Kind` + conversion factor; a `Value` is a magnitude + its `Unit`. A unit whose
+zero is not its kind's base zero (the degree Celsius) is a **separate type**,
+`AffineUnit`, carrying a separate `AffineValue`. A `Kind` is a vector of dimension exponents (length,
 mass, angle, time, temperature), so kinds compose: `Length.Mul(Length) == Area`,
 and `Value.Mul`/`Value.Div` derive the result kind instead of enumerating it.
 Design contract: `docs/kinds-design.md`.
@@ -24,18 +25,24 @@ about none of them.
 - **NEVER know about a consumer.** No sketch, no CAD, no document state, no
   geometry. Quantities and conversions only — if it is not a quantity or a
   conversion, it does not belong here.
-- **An affine unit gives up arithmetic, and that is the whole of the feature.**
-  `Celsius` and `Fahrenheit` carry an `offset` as well as a `factor`, so
-  `base == mag*factor + offset`. They convert, compare, print and persist; `Add`,
-  `Sub`, `Mul` and `Div` return `ErrAffineUnit`, because `20 °C × 2` is not
-  `40 °C` and two absolute temperatures do not add. NEVER "fix" this by picking
-  one of the plausible answers — every one of them is wrong invisibly, which is
-  the failure this library exists to prevent. `Scale`/`Neg` have no error channel
-  and document that they act on the magnitude, not the quantity. `DefineAffine`
-  is for a unit whose **zero really moves**, never for folding a datum, a bias or
-  a calibration constant into a unit. The conversion is ONE rational expression
-  rounded once, never a shift composed with a rescale — the rule below applies to
-  it unchanged.
+- **NEVER give a type a method it must refuse for its own values.** This is why
+  `AffineUnit`/`AffineValue` are separate types rather than an `offset` field on
+  `Unit`. An affine quantity has no meaningful `Add`, `Sub`, `Mul`, `Div`, `Scale`
+  or `Neg` — `20 °C × 2` is not `40 °C`, and two absolute temperatures do not add
+  — so `AffineValue` does not HAVE them, rather than having them and returning an
+  error. The earlier one-type design could not hold the line: `Scale`/`Neg` have
+  no error channel, so `Celsius(20).Scale(2)` silently gave `40 degC`. Splitting
+  the **unit** type (not just the value) is what makes it a compile error, because
+  a unit is a run-time value and `New(20, Celsius)` would otherwise have to panic.
+  Cross with `AffineValue.ToRatio(Kelvin)` and compute there. NEVER add arithmetic
+  to `AffineValue`, and NEVER re-add an `offset` to `Unit`. `DefineAffine` is for a
+  unit whose **zero really moves**, never for folding a datum, a bias or a
+  calibration constant into a unit; it rejects a zero offset for that reason.
+- **One symbol namespace, two registries.** `Define` and `DefineAffine` both
+  refuse a symbol either table holds, so `Lookup` and `LookupAffine` never
+  disagree and neither text form can carry the other type's quantity. The affine
+  conversion is ONE rational expression rounded once, never a shift composed with
+  a rescale — the rule below applies to it unchanged.
 - **NEVER coerce across kinds.** A length is not an angle. Converting between
   kinds returns an `error`; it is never a silent reinterpretation. `Angle` is a
   dimension of its own, never unified with `Dimensionless`; the sole carve-out

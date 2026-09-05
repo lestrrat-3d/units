@@ -15,150 +15,149 @@ import (
 // lands within a few ulps of the true value rather than on it.
 const tempTol = 1e-9
 
-func TestTemperatureConversion(t *testing.T) {
+func TestAffineToRatio(t *testing.T) {
 	t.Parallel()
 
+	// ToRatio is the crossing between the two types, and the reason an affine
+	// quantity needs no arithmetic of its own: it converts to one that has it.
 	for _, tc := range []struct {
 		name string
-		from units.Value
+		from units.AffineValue
 		to   units.Unit
 		want float64
 	}{
 		{name: "water freezes in kelvin", from: units.DegreesCelsius(0), to: units.Kelvin, want: 273.15},
 		{name: "water boils in kelvin", from: units.DegreesCelsius(100), to: units.Kelvin, want: 373.15},
-		{name: "absolute zero in celsius", from: units.Kelvins(0), to: units.Celsius, want: -273.15},
+		{name: "a nozzle at 210 degC", from: units.DegreesCelsius(210), to: units.Kelvin, want: 483.15},
+		{name: "fahrenheit to kelvin", from: units.DegreesFahrenheit(32), to: units.Kelvin, want: 273.15},
+		{name: "fahrenheit to rankine", from: units.DegreesFahrenheit(0), to: units.Rankine, want: 459.67},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			got, err := tc.from.ToRatio(tc.to)
+			require.NoError(t, err)
+			require.InDelta(t, tc.want, got.Mag(), tempTol)
+			require.Equal(t, tc.to, got.Unit())
+		})
+	}
+}
+
+func TestAffineConvert(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		name string
+		from units.AffineValue
+		to   units.AffineUnit
+		want float64
+	}{
 		{name: "water freezes in fahrenheit", from: units.DegreesCelsius(0), to: units.Fahrenheit, want: 32},
 		{name: "water boils in fahrenheit", from: units.DegreesCelsius(100), to: units.Fahrenheit, want: 212},
 		{name: "fahrenheit back to celsius", from: units.DegreesFahrenheit(32), to: units.Celsius, want: 0},
 		{name: "the scales cross at -40", from: units.DegreesFahrenheit(-40), to: units.Celsius, want: -40},
-		{name: "rankine shares the kelvin zero", from: units.Kelvins(0), to: units.Rankine, want: 0},
-		{name: "a nozzle at 210 degC", from: units.DegreesCelsius(210), to: units.Kelvin, want: 483.15},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 
-			got, err := tc.from.In(tc.to)
+			got, err := tc.from.Convert(tc.to)
 			require.NoError(t, err)
-			require.InDelta(t, tc.want, got, tempTol)
+			require.InDelta(t, tc.want, got.Mag(), tempTol)
 		})
 	}
 }
 
-func TestTemperatureRoundTripsThroughEveryUnit(t *testing.T) {
+func TestValueToAffine(t *testing.T) {
+	t.Parallel()
+
+	// And back the other way, so the two types are not a one-way door.
+	c, err := units.Kelvins(293.15).ToAffine(units.Celsius)
+	require.NoError(t, err)
+	require.InDelta(t, 20.0, c.Mag(), tempTol)
+
+	f, err := units.Kelvins(273.15).ToAffine(units.Fahrenheit)
+	require.NoError(t, err)
+	require.InDelta(t, 32.0, f.Mag(), tempTol)
+}
+
+func TestTemperatureRoundTripsThroughEveryScale(t *testing.T) {
 	t.Parallel()
 
 	// Whatever a temperature is carried in, converting away and back is the same
-	// quantity. This is the property the offset arithmetic has to keep.
-	scales := []units.Unit{units.Kelvin, units.Celsius, units.Fahrenheit, units.Rankine}
-	for _, from := range scales {
-		for _, to := range scales {
-			v := units.New(210, from)
+	// quantity. The property now has to hold across the type boundary as well as
+	// within it.
+	for _, from := range []units.AffineUnit{units.Celsius, units.Fahrenheit} {
+		for _, to := range []units.AffineUnit{units.Celsius, units.Fahrenheit} {
+			v := units.NewAffine(210, from)
 			round, err := v.Convert(to)
 			require.NoError(t, err)
 			back, err := round.Convert(from)
 			require.NoError(t, err)
-			require.True(t, v.Equal(back, tempTol),
-				"%s -> %s -> %s gave %s", v, to, from, back)
+			require.True(t, v.Equal(back, tempTol), "%s -> %s -> %s gave %s", v, to, from, back)
+		}
+		for _, to := range []units.Unit{units.Kelvin, units.Rankine} {
+			v := units.NewAffine(210, from)
+			round, err := v.ToRatio(to)
+			require.NoError(t, err)
+			back, err := round.ToAffine(from)
+			require.NoError(t, err)
+			require.True(t, v.Equal(back, tempTol), "%s -> %s -> %s gave %s", v, to, from, back)
 		}
 	}
 }
 
-func TestAffineUnitHasNoArithmetic(t *testing.T) {
+func TestAffineKindsDoNotCoerce(t *testing.T) {
 	t.Parallel()
 
-	c := units.DegreesCelsius(20)
-	k := units.Kelvins(5)
+	_, err := units.DegreesCelsius(20).ToRatio(units.Millimeter)
+	require.ErrorIs(t, err, units.ErrIncompatible)
 
-	for _, tc := range []struct {
-		name string
-		op   func() (units.Value, error)
-	}{
-		{name: "add affine to affine", op: func() (units.Value, error) { return c.Add(c) }},
-		{name: "add ratio to affine", op: func() (units.Value, error) { return c.Add(k) }},
-		{name: "add affine to ratio", op: func() (units.Value, error) { return k.Add(c) }},
-		{name: "sub", op: func() (units.Value, error) { return c.Sub(c) }},
-		{name: "mul", op: func() (units.Value, error) { return c.Mul(units.Scalar(2)) }},
-		{name: "mul from the other side", op: func() (units.Value, error) { return units.Scalar(2).Mul(c) }},
-		{name: "div", op: func() (units.Value, error) { return c.Div(units.Scalar(2)) }},
-		{name: "div by an affine", op: func() (units.Value, error) { return k.Div(c) }},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
+	_, err = units.DegreesCelsius(20).In(units.Second)
+	require.ErrorIs(t, err, units.ErrIncompatible)
 
-			_, err := tc.op()
-			require.ErrorIs(t, err, units.ErrAffineUnit)
-		})
-	}
+	_, err = units.Millimeters(20).ToAffine(units.Celsius)
+	require.ErrorIs(t, err, units.ErrIncompatible)
 }
 
-func TestKelvinKeepsItsArithmetic(t *testing.T) {
+func TestZeroAffineUnitIsNotAQuantity(t *testing.T) {
 	t.Parallel()
 
-	// The refusal is a property of the unit, not of the kind: converting to the
-	// base unit buys the arithmetic back.
-	k, err := units.DegreesCelsius(20).Convert(units.Kelvin)
-	require.NoError(t, err)
+	// The zero Value reads as 0 of One, but there is no natural affine unit to
+	// fall back on, so the zero AffineValue reports rather than invents.
+	var zero units.AffineValue
+	require.False(t, zero.Unit().Valid())
 
-	doubled, err := k.Mul(units.Scalar(2))
-	require.NoError(t, err)
-	require.InDelta(t, 586.3, doubled.Base(), tempTol)
+	_, err := zero.ToRatio(units.Kelvin)
+	require.ErrorIs(t, err, units.ErrNotAffine)
 
-	sum, err := k.Add(units.Kelvins(10))
-	require.NoError(t, err)
-	require.InDelta(t, 303.15, sum.Base(), tempTol)
-}
+	_, err = zero.MarshalText()
+	require.ErrorIs(t, err, units.ErrNotAffine)
 
-func TestAffineUnitReporting(t *testing.T) {
-	t.Parallel()
+	require.True(t, math.IsNaN(zero.Base()))
+	require.False(t, zero.Equal(zero, math.Inf(1)))
 
-	require.True(t, units.Celsius.Affine())
-	require.True(t, units.Fahrenheit.Affine())
-	require.False(t, units.Kelvin.Affine())
-	require.False(t, units.Rankine.Affine())
-	require.False(t, units.Millimeter.Affine())
-
-	require.Equal(t, 273.15, units.Celsius.Offset())
-	require.Equal(t, 0.0, units.Kelvin.Offset())
-
-	// The zero Unit reads as One, which shifts nothing.
-	var zero units.Unit
-	require.False(t, zero.Affine())
-	require.Equal(t, 0.0, zero.Offset())
-}
-
-func TestAffineBaseAndFromBase(t *testing.T) {
-	t.Parallel()
-
-	// Base scales then shifts; FromBase undoes it in the other order.
-	require.InDelta(t, 273.15, units.DegreesCelsius(0).Base(), tempTol)
-	require.InDelta(t, 0.0, units.FromBase(273.15, units.Celsius).Mag(), tempTol)
-	require.InDelta(t, 210.0, units.FromBase(483.15, units.Celsius).Mag(), tempTol)
+	var zeroUnit units.AffineUnit
+	_, err = units.Kelvins(1).ToAffine(zeroUnit)
+	require.ErrorIs(t, err, units.ErrNotAffine)
 }
 
 func TestAffineEquality(t *testing.T) {
 	t.Parallel()
 
-	// Equal magnitudes in units that share a factor but not a zero are not the
-	// same quantity: 0 degC and 0 K are 273.15 K apart.
-	require.False(t, units.DegreesCelsius(0).Equal(units.Kelvins(0), 0))
-	require.True(t, units.DegreesCelsius(0).Equal(units.Kelvins(273.15), tempTol))
 	require.True(t, units.DegreesCelsius(-40).Equal(units.DegreesFahrenheit(-40), tempTol))
 	require.False(t, units.DegreesCelsius(20).Equal(units.DegreesCelsius(21), 0))
+	require.True(t, units.DegreesCelsius(20).Equal(units.DegreesCelsius(20), 0))
 
-	// Reflexive, and symmetric across units.
-	c := units.DegreesCelsius(20)
-	require.True(t, c.Equal(c, 0))
-	k, err := c.Convert(units.Kelvin)
-	require.NoError(t, err)
-	require.True(t, k.Equal(c, tempTol))
-	require.True(t, c.Equal(k, tempTol))
+	// Across the two types: 0 degC really is 273.15 K.
+	require.True(t, units.DegreesCelsius(0).EqualValue(units.Kelvins(273.15), tempTol))
+	require.False(t, units.DegreesCelsius(0).EqualValue(units.Kelvins(0), tempTol))
 }
 
 func TestAffineTextRoundTrip(t *testing.T) {
 	t.Parallel()
 
 	type profile struct {
-		Nozzle units.Value `json:"nozzle"`
+		Nozzle units.AffineValue `json:"nozzle"`
 	}
 
 	data, err := json.Marshal(profile{Nozzle: units.DegreesCelsius(210)})
@@ -171,7 +170,27 @@ func TestAffineTextRoundTrip(t *testing.T) {
 	require.Equal(t, 210.0, got.Nozzle.Mag())
 }
 
-func TestDefineAffineRejectsNonFiniteOffset(t *testing.T) {
+func TestTextFormsDoNotCrossTypes(t *testing.T) {
+	t.Parallel()
+
+	// A ratio symbol is not an affine unit and vice versa, so neither type can be
+	// made to hold the other's quantity by way of a document.
+	var a units.AffineValue
+	require.ErrorIs(t, a.UnmarshalText([]byte("273.15 K")), units.ErrUnknownUnit)
+
+	var v units.Value
+	require.ErrorIs(t, v.UnmarshalText([]byte("210 degC")), units.ErrUnknownUnit)
+
+	// And the registries agree on which symbol is which.
+	_, ok := units.Lookup("degC")
+	require.False(t, ok)
+	_, ok = units.LookupAffine("K")
+	require.False(t, ok)
+	_, ok = units.LookupAffine("degC")
+	require.True(t, ok)
+}
+
+func TestDefineAffineRejects(t *testing.T) {
 	t.Parallel()
 
 	require.Panics(t, func() {
@@ -180,8 +199,20 @@ func TestDefineAffineRejectsNonFiniteOffset(t *testing.T) {
 	require.Panics(t, func() {
 		units.DefineAffine("probe-nan-offset", units.Temperature, 1, math.NaN())
 	})
+	// A zero offset is a ratio unit; there is no unit that is both.
+	require.Panics(t, func() {
+		units.DefineAffine("probe-zero-offset", units.Temperature, 2, 0)
+	})
+	// The symbol namespace is shared with the ratio units, in both directions.
+	require.Panics(t, func() {
+		units.DefineAffine("mm", units.Temperature, 1, 10)
+	})
+	require.Panics(t, func() {
+		units.Define("degC", units.Temperature, 1)
+	})
 
-	// A zero offset is an ordinary ratio unit, which is what Define builds.
-	u := units.DefineAffine("probe-zero-offset", units.Temperature, 2, 0)
-	require.False(t, u.Affine())
+	u := units.DefineAffine("probe-ok", units.Temperature, 2, 7)
+	require.True(t, u.Valid())
+	require.Equal(t, 7.0, u.Offset())
+	require.Equal(t, units.Temperature, u.Kind())
 }

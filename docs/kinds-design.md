@@ -51,7 +51,7 @@ Five base dimensions:
 | **Mass** (`m`) | mass properties: mass, density, moment of inertia |
 | **Angle** (`a`) | **see below — this one is a judgment call, not physics** |
 | **Time** (`t`) | rates: velocity, acceleration, feedrate, duration |
-| **Temperature** (`th`) | a process temperature; **the one dimension with affine units** |
+| **Temperature** (`th`) | a process temperature; **the one dimension with affine units, see §8** |
 
 There is no electric current, amount of substance or luminous intensity: nothing
 this library serves measures one, and a dimension nobody uses is a dimension
@@ -739,64 +739,94 @@ The compile-time breakage is small and mechanical:
 `sketch` is pre-1.0 with no tags, and its only consumer is `decad`, which has no
 code yet. This is the cheapest this migration will ever be.
 
-## 8. Affine units
+## 8. Affine units are a separate type
 
 Every unit but two is a pure ratio: `base == magnitude × factor`, and zero in one
 unit is zero in every other. The degree Celsius is not. It has the kelvin's size
-but a different zero, so reaching the base unit is a scale **and** a shift:
+but a different zero, so reaching the base unit is a scale **and** a shift.
+
+The first cut of this feature put an `offset` on `Unit` and had `Add`, `Sub`,
+`Mul` and `Div` return an `ErrAffineUnit` when they met one. That was wrong, for
+a reason worth writing down: **a type should not carry methods it cannot honour
+for its own values.** Half of `Value`'s arithmetic became a run-time refusal that
+existed only for two of the forty-odd units, and `Scale` and `Neg` — which have
+no error to return — could not refuse at all, so `Celsius(20).Scale(2)` quietly
+gave `40 degC`.
+
+So the two sorts of unit are two types, and neither has a method it must refuse:
 
 ```go
-type Unit struct {
+type Unit struct {                 // always a ratio
     symbol string
     kind   Kind
-    factor float64 // magnitude * factor + offset == magnitude in the base unit
-    offset float64 // zero for every ratio unit, which is nearly all of them
+    factor float64                 // magnitude * factor == magnitude in the base unit
+}
+
+type AffineUnit struct {           // zero moved
+    symbol string
+    kind   Kind
+    factor float64                 // magnitude * factor + offset == magnitude in the base unit
+    offset float64                 // never zero for a registered unit
 }
 ```
 
-`Define` builds ratio units only, so every unit that predates this change is
-unchanged and every conversion between two of them is the same helper, the same
-rounding, and the same result bit for bit. `DefineAffine` is the way in, and
-`Unit.Affine()` reports the result.
+`Value` carries a `Unit` and keeps every method it ever had, all of them
+meaningful for every value of it. `AffineValue` carries an `AffineUnit` and has
+**no `Add`, `Sub`, `Mul`, `Div`, `Scale` or `Neg` at all** — not a refusing
+version, no version. `ErrAffineUnit` is gone; there is nothing left to report.
 
-### An affine unit gives up arithmetic
+### Why this is enforceable in Go, and the one-type split was not
 
-This is the part that matters. A value in an affine unit **converts, compares,
-prints and persists**, and `Add`, `Sub`, `Mul` and `Div` return `ErrAffineUnit`
-rather than a number.
+A unit is a run-time value, so a *value*-only split cannot hold: with one `Unit`
+type, `New(20, Celsius)` still compiles and a ratio-only `Value` could only panic
+on it. Splitting the **unit** type moves the wall to where the compiler stands:
 
-They are refused because they have no answer to give:
+```go
+units.New(20, units.Celsius)      // does not compile: Celsius is an AffineUnit
+units.DegreesCelsius(20).Scale(2) // does not compile: AffineValue has no Scale
+```
 
-- `20 °C × 2` is not `40 °C`. Doubling states a ratio, and `0 °C` is not the
-  absence of temperature, so there is no ratio to double.
-- `20 °C + 5 °C` is not `25 °C`. Two absolute temperatures do not add. Only a
-  temperature and a *difference* do, and a temperature difference is a separate
-  quantity this library does not model.
+No constructor panics, and no operation refuses at run time.
 
-Every answer those operations could return is wrong in a way the caller cannot
-see, which is the one failure mode this library exists to prevent. Converting to
-`Kelvin` — a ratio unit — buys the arithmetic back, correct.
+### Crossing between them
 
-`Value.Scale` and `Value.Neg` have no error to return and so cannot refuse; each
-documents that it operates on the magnitude in the value's own unit, and that this
-is not the quantity for an affine unit.
+The crossing is an ordinary conversion, because the kelvin *is* a ratio unit:
+
+```go
+func (a AffineValue) ToRatio(u Unit) (Value, error)        // DegreesCelsius(20).ToRatio(Kelvin)
+func (v Value) ToAffine(u AffineUnit) (AffineValue, error) // Kelvins(293.15).ToAffine(Celsius)
+```
+
+To compute with a temperature, convert it to `Kelvin` and compute there. That is
+not a workaround; it is the statement that the arithmetic belongs on the scale
+whose zero means something.
+
+### One symbol namespace, two registries
+
+`Lookup` resolves ratio symbols and `LookupAffine` resolves affine ones, over a
+single namespace that `Define` and `DefineAffine` both check, so no symbol names
+one of each. That is what keeps the text form honest in both directions:
+`Value.UnmarshalText("210 degC")` is `ErrUnknownUnit`, and so is
+`AffineValue.UnmarshalText("273.15 K")`. Neither type can be handed the other's
+quantity by way of a document.
 
 ### Why the conversion is one step
 
-`In` through an affine unit is
+A conversion through an affine unit is
 `(m × from.factor + from.offset − to.offset) ÷ to.factor`, evaluated whole in
 exact rationals and rounded once. Shifting into base units and then rescaling
 would be the composition this library refuses everywhere else: the rounding
 between the two steps happens before the division can use the bits it destroyed.
 Temperatures sit in the middle of the float64 range, so always taking the
-rational path costs nothing anyone measures.
+rational path costs nothing anyone measures. Where both offsets are zero the
+helper *is* `rescale`, bit for bit, so nothing about ratio conversion changed.
 
 ## 9. Non-goals
 
 Electric current, amount of substance, luminous intensity and the rest of SI —
 nothing this library serves measures one. A temperature **difference** as a kind
-distinct from an absolute temperature (see §8: the arithmetic is refused rather
-than modelled). Unit *parsing* from arbitrary strings (`Lookup` by symbol is for deserialization,
+distinct from an absolute temperature (see §8: an absolute temperature simply has
+no arithmetic, and a difference belongs to `Value` in kelvin). Unit *parsing* from arbitrary strings (`Lookup` by symbol is for deserialization,
 not a expression parser; `sketch/param` owns expressions; `UnmarshalText` reads the
 one text form this library writes, and nothing else). Automatic unit *selection*
 for display (that is `System`'s job). Compound symbol synthesis for unnamed kinds
