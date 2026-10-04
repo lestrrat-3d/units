@@ -19,6 +19,9 @@ func TestKindComposition(t *testing.T) {
 		{"volume / area = length", units.Volume.Div(units.Area), units.Length},
 		{"mass / volume = density", units.Mass.Div(units.Volume), units.Density},
 		{"mass x area = moment of inertia", units.Mass.Mul(units.Area), units.MomentOfInertia},
+		{"moment of inertia / time = angular momentum", units.MomentOfInertia.Div(units.Time), units.AngularMomentum},
+		{"impulse x length = angular momentum", units.Impulse.Mul(units.Length), units.AngularMomentum},
+		{"torque x time = angular momentum", units.Torque.Mul(units.Time), units.AngularMomentum},
 		{"area x area = second moment of area", units.Area.Mul(units.Area), units.SecondMomentOfArea},
 		{"length^3 = volume", units.Length.Pow(3), units.Volume},
 		{"length^4 = second moment of area", units.Length.Pow(4), units.SecondMomentOfArea},
@@ -45,6 +48,7 @@ func TestKindDistinct(t *testing.T) {
 	require.NotEqual(t, units.Angle, units.Angle.Mul(units.Angle), "an angle is not a squared angle")
 	require.NotEqual(t, units.Area, units.Volume)
 	require.NotEqual(t, units.Density, units.MomentOfInertia)
+	require.NotEqual(t, units.AngularMomentum, units.Torque)
 }
 
 func TestKindString(t *testing.T) {
@@ -60,6 +64,7 @@ func TestKindString(t *testing.T) {
 		{"mass", units.Mass},
 		{"density", units.Density},
 		{"moment of inertia", units.MomentOfInertia},
+		{"angular momentum", units.AngularMomentum},
 		{"second moment of area", units.SecondMomentOfArea},
 		{"L⁻¹", units.Dimensionless.Div(units.Length)},                    // curvature
 		{"L⁵", units.Length.Pow(5)},                                       // unnamed, no base unit
@@ -80,7 +85,7 @@ func namedKinds() []units.Kind {
 		units.Dimensionless, units.Length, units.Area, units.Volume, units.Angle,
 		units.Mass, units.Density, units.MomentOfInertia, units.SecondMomentOfArea,
 		units.Time, units.Velocity, units.Acceleration, units.AngularVelocity,
-		units.Impulse, units.Force, units.Torque, units.Temperature,
+		units.Impulse, units.AngularMomentum, units.Force, units.Torque, units.Temperature,
 	}
 }
 

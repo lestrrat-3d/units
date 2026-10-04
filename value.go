@@ -217,6 +217,10 @@ func DegreesPerSecond(x float64) Value { return New(x, DegreePerSecond) }
 
 func KilogramMillimetersPerSecond(x float64) Value { return New(x, KilogramMillimeterPerSecond) }
 
+func KilogramSquareMillimetersPerSecond(x float64) Value {
+	return New(x, KilogramSquareMillimeterPerSecond)
+}
+
 func KilogramMillimetersPerSecondSquared(x float64) Value {
 	return New(x, KilogramMillimeterPerSecondSquared)
 }

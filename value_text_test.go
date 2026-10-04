@@ -112,6 +112,7 @@ func TestValueTextForm(t *testing.T) {
 		{units.CubicInches(3), "3 in^3"},
 		{units.KilogramsPerCubicMeter(7850), "7850 kg/m^3"},
 		{units.KilogramSquareMillimeters(1e-7), "1e-07 kg*mm^2"},
+		{units.KilogramSquareMillimetersPerSecond(1e-7), "1e-07 kg*mm^2/s"},
 		{units.Degrees(90), "90 deg"},
 		{units.Radians(math.Pi), "3.141592653589793 rad"},
 		{units.Thous(1), "1 thou"},

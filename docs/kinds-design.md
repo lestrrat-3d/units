@@ -123,6 +123,7 @@ var (
     Acceleration  = Kind{l: 1, t: -2}   // L·T⁻²
     AngularVelocity = Kind{a: 1, t: -1} // A·T⁻¹
     Impulse       = Kind{l: 1, m: 1, t: -1} // M·L·T⁻¹
+    AngularMomentum = Kind{l: 2, m: 1, t: -1} // M·L²·T⁻¹
     Force         = Kind{l: 1, m: 1, t: -2} // M·L·T⁻²
     Torque        = Kind{l: 2, m: 1, t: -2} // M·L²·T⁻²
     Temperature   = Kind{th: 1}
@@ -152,6 +153,11 @@ func (v Value) Div(o Value) (Value, error)
 enumerating that length times length is an area.
 
 `Add`/`Sub` still require equal kinds (plus the angle/dimensionless carve-out).
+
+`AngularVelocity` carries the angle exponent, so multiplying it directly by
+`MomentOfInertia` produces M·L²·A·T⁻¹. Divide the angular velocity value by
+`Radians(1)` before multiplying by inertia to obtain `AngularMomentum`
+(M·L²·T⁻¹).
 
 ### The result is finite, or it is an error
 
@@ -513,6 +519,7 @@ need base units and a starter set:
 | Acceleration | mm/s^2 | m/s^2 |
 | AngularVelocity | rad/s | deg/s |
 | Impulse | kg*mm/s | — |
+| AngularMomentum | kg*mm^2/s | — |
 | Force | kg*mm/s^2 | N |
 | Torque | kg*mm^2/s^2 | N*mm |
 | Temperature | K | degR |

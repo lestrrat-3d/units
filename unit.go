@@ -162,6 +162,8 @@ var (
 
 	// KilogramMillimeterPerSecond measures [Impulse] (M·L·T⁻¹); it is the base unit.
 	KilogramMillimeterPerSecond = defineBase("kg*mm/s", Impulse)
+	// KilogramSquareMillimeterPerSecond measures [AngularMomentum] (M·L²·T⁻¹); it is the base unit.
+	KilogramSquareMillimeterPerSecond = defineBase("kg*mm^2/s", AngularMomentum)
 
 	// KilogramMillimeterPerSecondSquared measures [Force] (M·L·T⁻²); it is the base unit.
 	KilogramMillimeterPerSecondSquared = defineBase("kg*mm/s^2", Force)
