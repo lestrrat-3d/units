@@ -73,12 +73,14 @@ func TestKindString(t *testing.T) {
 	}
 }
 
-// namedKinds are the nine kinds the package names and registers a base unit for.
+// namedKinds are the kinds the package names and registers a base unit for.
 // A saturated kind must never compare equal to one of them.
 func namedKinds() []units.Kind {
 	return []units.Kind{
 		units.Dimensionless, units.Length, units.Area, units.Volume, units.Angle,
 		units.Mass, units.Density, units.MomentOfInertia, units.SecondMomentOfArea,
+		units.Time, units.Velocity, units.Acceleration, units.AngularVelocity,
+		units.Impulse, units.Force, units.Torque, units.Temperature,
 	}
 }
 

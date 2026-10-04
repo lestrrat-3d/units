@@ -83,10 +83,8 @@ func (u Unit) String() string {
 	return u.symbol
 }
 
-// The built-in units. Every kind with a name has a base unit, whose factor is 1:
-// [One], [Millimeter], [SquareMillimeter], [CubicMillimeter], [Kilogram],
-// [KilogramPerCubicMillimeter], [Radian], [KilogramSquareMillimeter] and
-// [QuarticMillimeter].
+// The built-in units. Every kind with a name has a base unit with factor 1;
+// [BaseUnit] returns that unit for each named kind.
 var (
 	// One is the dimensionless unit.
 	One = defineBase("", Dimensionless)
@@ -156,6 +154,23 @@ var (
 	// [Acceleration]; the millimetre per second squared is the base unit.
 	MillimeterPerSecondSquared = defineBase("mm/s^2", Acceleration)
 	MeterPerSecondSquared      = define("m/s^2", Acceleration, 1000)
+
+	// RadianPerSecond and DegreePerSecond measure [AngularVelocity]; the radian
+	// per second is the base unit. Angle remains a separate dimension.
+	RadianPerSecond = defineBase("rad/s", AngularVelocity)
+	DegreePerSecond = define("deg/s", AngularVelocity, math.Pi/180)
+
+	// KilogramMillimeterPerSecond measures [Impulse] (M·L·T⁻¹); it is the base unit.
+	KilogramMillimeterPerSecond = defineBase("kg*mm/s", Impulse)
+
+	// KilogramMillimeterPerSecondSquared measures [Force] (M·L·T⁻²); it is the base unit.
+	KilogramMillimeterPerSecondSquared = defineBase("kg*mm/s^2", Force)
+	Newton                             = define("N", Force, 1000)
+
+	// KilogramSquareMillimeterPerSecondSquared measures [Torque] (M·L²·T⁻²); it is the base unit.
+	// A radian must be converted explicitly to a scalar in torque work calculations.
+	KilogramSquareMillimeterPerSecondSquared = defineBase("kg*mm^2/s^2", Torque)
+	NewtonMillimeter                         = define("N*mm", Torque, 1000)
 
 	// Kelvin and Rankine measure [Temperature]; the kelvin is the base unit.
 	// Both share the kelvin's zero, so both are ordinary ratio units and carry

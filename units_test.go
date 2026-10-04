@@ -151,6 +151,14 @@ func builtinUnits() []units.Unit {
 		units.KilogramPerCubicMillimeter, units.KilogramPerCubicMeter, units.GramPerCubicCentimeter,
 		units.KilogramSquareMillimeter, units.QuarticMillimeter,
 		units.Radian, units.Degree,
+		units.Second, units.Millisecond, units.Minute, units.Hour,
+		units.MillimeterPerSecond, units.MeterPerSecond, units.MillimeterPerMinute,
+		units.MillimeterPerSecondSquared, units.MeterPerSecondSquared,
+		units.RadianPerSecond, units.DegreePerSecond,
+		units.KilogramMillimeterPerSecond,
+		units.KilogramMillimeterPerSecondSquared, units.Newton,
+		units.KilogramSquareMillimeterPerSecondSquared, units.NewtonMillimeter,
+		units.Kelvin, units.Rankine,
 	}
 }
 

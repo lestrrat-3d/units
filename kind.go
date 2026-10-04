@@ -69,6 +69,14 @@ var (
 	Velocity = Kind{l: 1, t: -1}
 	// Acceleration is L·T⁻²; its base unit is the millimetre per second squared.
 	Acceleration = Kind{l: 1, t: -2}
+	// AngularVelocity is A·T⁻¹; its base unit is the radian per second.
+	AngularVelocity = Kind{a: 1, t: -1}
+	// Impulse is M·L·T⁻¹; its base unit is the kilogram millimetre per second.
+	Impulse = Kind{l: 1, m: 1, t: -1}
+	// Force is M·L·T⁻²; its base unit is the kilogram millimetre per second squared.
+	Force = Kind{l: 1, m: 1, t: -2}
+	// Torque is M·L²·T⁻²; its base unit is the kilogram square millimetre per second squared.
+	Torque = Kind{l: 2, m: 1, t: -2}
 	// Temperature is a thermodynamic temperature; its base unit is the kelvin.
 	Temperature = Kind{th: 1}
 )
@@ -89,6 +97,10 @@ var kindNames = map[Kind]string{
 	Time:               "time",
 	Velocity:           "velocity",
 	Acceleration:       "acceleration",
+	AngularVelocity:    "angular velocity",
+	Impulse:            "impulse",
+	Force:              "force",
+	Torque:             "torque",
 	Temperature:        "temperature",
 }
 
