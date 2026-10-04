@@ -67,6 +67,8 @@ func TestRigidDynamicsDimensionsComposeAndPersist(t *testing.T) {
 		{"angular velocity", units.RadiansPerSecond(2), units.AngularVelocity, units.RadianPerSecond, `"2 rad/s"`},
 		{"impulse", units.KilogramMillimetersPerSecond(3), units.Impulse,
 			units.KilogramMillimeterPerSecond, `"3 kg*mm/s"`},
+		{"angular momentum", units.KilogramSquareMillimetersPerSecond(3), units.AngularMomentum,
+			units.KilogramSquareMillimeterPerSecond, `"3 kg*mm^2/s"`},
 		{"force", units.KilogramMillimetersPerSecondSquared(4), units.Force,
 			units.KilogramMillimeterPerSecondSquared, `"4 kg*mm/s^2"`},
 		{"torque", units.KilogramSquareMillimetersPerSecondSquared(5), units.Torque,
@@ -94,6 +96,28 @@ func TestRigidDynamicsDimensionsComposeAndPersist(t *testing.T) {
 	impulse, err := units.Kilograms(2).Mul(units.MillimetersPerSecond(3))
 	require.NoError(t, err)
 	require.Equal(t, units.Impulse, impulse.Kind())
+
+	angularMomentum, err := units.KilogramSquareMillimeters(3).Div(units.Seconds(2))
+	require.NoError(t, err)
+	require.Equal(t, units.AngularMomentum, angularMomentum.Kind())
+	require.Equal(t, units.KilogramSquareMillimeterPerSecond, angularMomentum.Unit())
+	data, err := json.Marshal(angularMomentum)
+	require.NoError(t, err)
+	require.JSONEq(t, `"1.5 kg*mm^2/s"`, string(data))
+	var decoded units.Value
+	require.NoError(t, json.Unmarshal(data, &decoded))
+	require.Equal(t, angularMomentum, decoded)
+
+	spinProduct, err := units.KilogramSquareMillimeters(3).Mul(units.RadiansPerSecond(2))
+	require.NoError(t, err)
+	require.NotEqual(t, units.AngularMomentum, spinProduct.Kind())
+	spinRate, err := units.RadiansPerSecond(2).Div(units.Radians(1))
+	require.NoError(t, err)
+	spinMomentum, err := units.KilogramSquareMillimeters(3).Mul(spinRate)
+	require.NoError(t, err)
+	require.Equal(t, units.AngularMomentum, spinMomentum.Kind())
+	require.Equal(t, units.KilogramSquareMillimeterPerSecond, spinMomentum.Unit())
+	require.Equal(t, 6.0, spinMomentum.Mag())
 
 	force, err := impulse.Div(units.Seconds(2))
 	require.NoError(t, err)

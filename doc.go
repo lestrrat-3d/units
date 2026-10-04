@@ -69,9 +69,11 @@
 // infinity it is — never as a finite number that would be read as a quantity it
 // is not.
 //
-// The named kinds are [Dimensionless], [Length], [Area], [Volume], [Angle],
-// [Mass], [Density], [MomentOfInertia] and [SecondMomentOfArea]. Every one of
-// them has a registered base unit. A kind need not be named to be usable:
+// The named kinds include [Dimensionless], [Length], [Area], [Volume], [Angle],
+// [Mass], [Density], [MomentOfInertia], [AngularMomentum], [SecondMomentOfArea],
+// [Time], [Velocity], [Acceleration], [AngularVelocity], [Impulse], [Force],
+// [Torque] and [Temperature]. Every one has a registered base unit. A kind
+// need not be named to be usable:
 // dividing a dimensionless value by a length yields an inverse length, which
 // compares and prints ("L⁻¹") like any other kind, though [BaseUnit] reports
 // that no base unit is registered for it.
@@ -85,11 +87,12 @@
 // exponent is a lie about the number, and it must not be able to pass for a
 // plausible kind.
 //
-// Base units are the millimetre ([Length]), the square millimetre ([Area]), the
+// Base units include the millimetre ([Length]), the square millimetre ([Area]), the
 // cubic millimetre ([Volume]), the kilogram ([Mass]), the kilogram per cubic
 // millimetre ([Density]), the kilogram square millimetre ([MomentOfInertia]),
-// the quartic millimetre ([SecondMomentOfArea]) and the radian ([Angle]); every
-// unit stores its conversion factor to its kind's base. Unit symbols are
+// the kilogram square millimetre per second ([AngularMomentum]), the quartic
+// millimetre ([SecondMomentOfArea]) and the radian ([Angle]); every unit stores
+// its conversion factor to its kind's base. Unit symbols are
 // printable ASCII without the space and write an exponent with a caret: "mm^2",
 // "in^3", "kg/m^3". A unit whose conventional symbol is not ASCII is registered
 // under an ASCII spelling, as the built-in "deg" is for the degree sign.

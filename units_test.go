@@ -155,7 +155,7 @@ func builtinUnits() []units.Unit {
 		units.MillimeterPerSecond, units.MeterPerSecond, units.MillimeterPerMinute,
 		units.MillimeterPerSecondSquared, units.MeterPerSecondSquared,
 		units.RadianPerSecond, units.DegreePerSecond,
-		units.KilogramMillimeterPerSecond,
+		units.KilogramMillimeterPerSecond, units.KilogramSquareMillimeterPerSecond,
 		units.KilogramMillimeterPerSecondSquared, units.Newton,
 		units.KilogramSquareMillimeterPerSecondSquared, units.NewtonMillimeter,
 		units.Kelvin, units.Rankine,
@@ -191,8 +191,17 @@ func TestBaseUnits(t *testing.T) {
 		{units.Mass, units.Kilogram},
 		{units.Density, units.KilogramPerCubicMillimeter},
 		{units.MomentOfInertia, units.KilogramSquareMillimeter},
+		{units.AngularMomentum, units.KilogramSquareMillimeterPerSecond},
 		{units.SecondMomentOfArea, units.QuarticMillimeter},
 		{units.Angle, units.Radian},
+		{units.Time, units.Second},
+		{units.Velocity, units.MillimeterPerSecond},
+		{units.Acceleration, units.MillimeterPerSecondSquared},
+		{units.AngularVelocity, units.RadianPerSecond},
+		{units.Impulse, units.KilogramMillimeterPerSecond},
+		{units.Force, units.KilogramMillimeterPerSecondSquared},
+		{units.Torque, units.KilogramSquareMillimeterPerSecondSquared},
+		{units.Temperature, units.Kelvin},
 	} {
 		t.Run(tc.kind.String(), func(t *testing.T) {
 			u, ok := units.BaseUnit(tc.kind)
@@ -543,7 +552,9 @@ func TestNamedKindsHaveBaseUnits(t *testing.T) {
 	// kinds ever falls back to a synthetic unit.
 	for _, k := range []units.Kind{
 		units.Dimensionless, units.Length, units.Area, units.Volume, units.Angle,
-		units.Mass, units.Density, units.MomentOfInertia, units.SecondMomentOfArea,
+		units.Mass, units.Density, units.MomentOfInertia, units.AngularMomentum, units.SecondMomentOfArea,
+		units.Time, units.Velocity, units.Acceleration, units.AngularVelocity,
+		units.Impulse, units.Force, units.Torque, units.Temperature,
 	} {
 		t.Run(k.String(), func(t *testing.T) {
 			u, ok := units.BaseUnit(k)
@@ -781,7 +792,7 @@ func TestSystemNeverCoercesKind(t *testing.T) {
 	curvature := units.Dimensionless.Div(units.Length)
 	kinds := []units.Kind{
 		units.Dimensionless, units.Length, units.Angle, units.Area, units.Volume,
-		units.Mass, units.Density, units.MomentOfInertia, units.SecondMomentOfArea,
+		units.Mass, units.Density, units.MomentOfInertia, units.AngularMomentum, units.SecondMomentOfArea,
 		curvature,
 		units.Mass.Div(units.Area),
 		units.Length.Div(units.Angle),

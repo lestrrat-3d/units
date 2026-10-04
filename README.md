@@ -58,6 +58,9 @@ top of it, and depends only on the standard library.
 - **An angle is its own dimension**, even though a radian is physically a ratio
   of two lengths, so a bare number can never pass as an angle. The one carve-out
   is that `Add`/`Sub` accept an angle and a dimensionless value together.
+  Multiplying `MomentOfInertia` by `AngularVelocity` retains the angle dimension.
+  Divide the angular velocity value by `Radians(1)` before multiplying it by
+  the inertia to obtain `AngularMomentum`.
 - **An exponent that overflows says so, and keeps saying so.** Exponents are
   `int8`; a composition that runs off the end saturates and marks the kind
   **overflowed** (`Kind.Overflowed()`). The mark is sticky: `Mul`, `Div` and `Pow`
@@ -68,10 +71,14 @@ top of it, and depends only on the standard library.
 - **Every named kind has a base unit**: the millimetre (`Length`), the square
   millimetre (`Area`), the cubic millimetre (`Volume`), the kilogram (`Mass`),
   the kilogram per cubic millimetre (`Density`), the kilogram square millimetre
-  (`MomentOfInertia`), the quartic millimetre (`SecondMomentOfArea`), the
-  radian (`Angle`), the second (`Time`), the millimetre per second (`Velocity`),
-  the millimetre per second squared (`Acceleration`) and the kelvin
-  (`Temperature`). Every unit stores its factor to its kind's base. Symbols are
+  (`MomentOfInertia`), the kilogram square millimetre per second
+  (`AngularMomentum`), the quartic millimetre (`SecondMomentOfArea`), the radian
+  (`Angle`), the second (`Time`), the millimetre per second (`Velocity`), the
+  millimetre per second squared (`Acceleration`), the radian per second
+  (`AngularVelocity`), the kilogram millimetre per second (`Impulse`), the
+  kilogram millimetre per second squared (`Force`), the kilogram square
+  millimetre per second squared (`Torque`) and the kelvin (`Temperature`). Every
+  unit stores its factor to its kind's base. Symbols are
   printable ASCII without the space, with a caret for an exponent: `mm^2`,
   `in^3`, `kg/m^3`. A unit whose conventional symbol is not ASCII (µm, °, Å)
   registers under an ASCII spelling (`um`, `deg`, `angstrom`), as the built-ins
