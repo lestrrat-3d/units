@@ -121,6 +121,10 @@ var (
     Time          = Kind{t: 1}
     Velocity      = Kind{l: 1, t: -1}   // L·T⁻¹
     Acceleration  = Kind{l: 1, t: -2}   // L·T⁻²
+    AngularVelocity = Kind{a: 1, t: -1} // A·T⁻¹
+    Impulse       = Kind{l: 1, m: 1, t: -1} // M·L·T⁻¹
+    Force         = Kind{l: 1, m: 1, t: -2} // M·L·T⁻²
+    Torque        = Kind{l: 2, m: 1, t: -2} // M·L²·T⁻²
     Temperature   = Kind{th: 1}
 )
 ```
@@ -504,6 +508,14 @@ need base units and a starter set:
 | MomentOfInertia | kg*mm^2 | — |
 | SecondMomentOfArea | mm^4 | — |
 | Angle | rad | rad, deg |
+| Time | s | ms, min, h |
+| Velocity | mm/s | m/s, mm/min |
+| Acceleration | mm/s^2 | m/s^2 |
+| AngularVelocity | rad/s | deg/s |
+| Impulse | kg*mm/s | — |
+| Force | kg*mm/s^2 | N |
+| Torque | kg*mm^2/s^2 | N*mm |
+| Temperature | K | degR |
 
 **Every named kind has a registered base unit.** `BaseUnit(k)` is a lookup rather
 than a switch, and returns `(Unit, bool)` — an unnamed kind like `L⁻¹` has no

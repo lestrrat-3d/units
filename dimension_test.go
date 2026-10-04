@@ -1,6 +1,7 @@
 package units_test
 
 import (
+	"encoding/json"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -51,6 +52,75 @@ func TestTimeDimensionComposes(t *testing.T) {
 			require.Equal(t, tc.want, got.Kind())
 		})
 	}
+}
+
+func TestRigidDynamicsDimensionsComposeAndPersist(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		name  string
+		value units.Value
+		kind  units.Kind
+		base  units.Unit
+		text  string
+	}{
+		{"angular velocity", units.RadiansPerSecond(2), units.AngularVelocity, units.RadianPerSecond, `"2 rad/s"`},
+		{"impulse", units.KilogramMillimetersPerSecond(3), units.Impulse,
+			units.KilogramMillimeterPerSecond, `"3 kg*mm/s"`},
+		{"force", units.KilogramMillimetersPerSecondSquared(4), units.Force,
+			units.KilogramMillimeterPerSecondSquared, `"4 kg*mm/s^2"`},
+		{"torque", units.KilogramSquareMillimetersPerSecondSquared(5), units.Torque,
+			units.KilogramSquareMillimeterPerSecondSquared, `"5 kg*mm^2/s^2"`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			require.Equal(t, tc.kind, tc.value.Kind())
+			base, ok := units.BaseUnit(tc.kind)
+			require.True(t, ok)
+			require.Equal(t, tc.base, base)
+			data, err := json.Marshal(tc.value)
+			require.NoError(t, err)
+			require.JSONEq(t, tc.text, string(data))
+			var decoded units.Value
+			require.NoError(t, json.Unmarshal(data, &decoded))
+			require.Equal(t, tc.value, decoded)
+		})
+	}
+
+	angular, err := units.Radians(6).Div(units.Seconds(2))
+	require.NoError(t, err)
+	require.Equal(t, units.AngularVelocity, angular.Kind())
+
+	impulse, err := units.Kilograms(2).Mul(units.MillimetersPerSecond(3))
+	require.NoError(t, err)
+	require.Equal(t, units.Impulse, impulse.Kind())
+
+	force, err := impulse.Div(units.Seconds(2))
+	require.NoError(t, err)
+	require.Equal(t, units.Force, force.Kind())
+
+	torque, err := force.Mul(units.Millimeters(5))
+	require.NoError(t, err)
+	require.Equal(t, units.Torque, torque.Kind())
+
+	_, err = units.RadiansPerSecond(1).In(units.MillimeterPerSecond)
+	require.ErrorIs(t, err, units.ErrIncompatible)
+}
+
+func TestRigidDynamicsUnitConversions(t *testing.T) {
+	t.Parallel()
+
+	degrees, err := units.RadiansPerSecond(1).In(units.DegreePerSecond)
+	require.NoError(t, err)
+	require.InDelta(t, 180/3.141592653589793, degrees, 1e-12)
+
+	force, err := units.Newtons(1).In(units.KilogramMillimeterPerSecondSquared)
+	require.NoError(t, err)
+	require.Equal(t, 1000.0, force)
+
+	torque, err := units.NewtonMillimeters(1).In(units.KilogramSquareMillimeterPerSecondSquared)
+	require.NoError(t, err)
+	require.Equal(t, 1000.0, torque)
 }
 
 func TestTimeAndVelocityConversion(t *testing.T) {

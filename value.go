@@ -212,6 +212,21 @@ func MillimetersPerMinute(x float64) Value { return New(x, MillimeterPerMinute) 
 func MillimetersPerSecondSquared(x float64) Value { return New(x, MillimeterPerSecondSquared) }
 func MetersPerSecondSquared(x float64) Value      { return New(x, MeterPerSecondSquared) }
 
+func RadiansPerSecond(x float64) Value { return New(x, RadianPerSecond) }
+func DegreesPerSecond(x float64) Value { return New(x, DegreePerSecond) }
+
+func KilogramMillimetersPerSecond(x float64) Value { return New(x, KilogramMillimeterPerSecond) }
+
+func KilogramMillimetersPerSecondSquared(x float64) Value {
+	return New(x, KilogramMillimeterPerSecondSquared)
+}
+func Newtons(x float64) Value { return New(x, Newton) }
+
+func KilogramSquareMillimetersPerSecondSquared(x float64) Value {
+	return New(x, KilogramSquareMillimeterPerSecondSquared)
+}
+func NewtonMillimeters(x float64) Value { return New(x, NewtonMillimeter) }
+
 // Kelvins and DegreesRankine build a temperature on a ratio scale. The Celsius
 // and Fahrenheit scales are affine, so their quantities are an [AffineValue]:
 // see [DegreesCelsius] and [DegreesFahrenheit].
